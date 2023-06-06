@@ -1,0 +1,6 @@
+/.dockerignore
+/.env
+/.env.*
+/.go-version
+/artifacts
+/build
