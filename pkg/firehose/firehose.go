@@ -6,51 +6,36 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"net/url"
-	"os"
 	"regexp"
-	"strconv"
 	"strings"
-	"sync"
-
-	"github.com/flicknow/go-bluesky-bot/pkg/client"
-	"github.com/flicknow/go-bluesky-bot/pkg/cmd"
-	"github.com/flicknow/go-bluesky-bot/pkg/utils"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	appbsky "github.com/bluesky-social/indigo/api/bsky"
 	"github.com/bluesky-social/indigo/events"
-	"github.com/bluesky-social/indigo/events/schedulers/sequential"
 	lexutil "github.com/bluesky-social/indigo/lex/util"
 	"github.com/bluesky-social/indigo/repo"
 	"github.com/bluesky-social/indigo/repomgr"
-	"github.com/gorilla/websocket"
+	"github.com/flicknow/go-bluesky-bot/pkg/utils"
+)
+
+const (
+	EvtKindFirehoseHandle    = "#handle"
+	EvtKindFirehoseIdentity  = "#identity"
+	EvtKindFirehoseInfo      = "#info"
+	EvtKindFirehoseMigrate   = "#migrate"
+	EvtKindFirehoseTombstone = "#tombstone"
+	EvtKindFirehoseDelete    = "#delete"
+	EvtKindFirehoseBlock     = "#block"
+	EvtKindFirehoseFollow    = "#follow"
+	EvtKindFirehoseLike      = "#like"
+	EvtKindFirehosePost      = "#post"
+	EvtKindFirehoseProfile   = "#profile"
+	EvtKindFirehoseRepost    = "#repost"
 )
 
 var DefaultBgsHost = "https://bsky.network"
 var DmRegex = regexp.MustCompile(`(?i)^\W*DM\W*\s@\w+\.`)
-
-type Firehose struct {
-	Client       client.Client
-	Cursor       int64
-	addr         string
-	con          *websocket.Conn
-	conCtx       context.Context
-	conCtxCancel context.CancelFunc
-	mu           sync.Mutex
-	cursorPath   string
-	debug        bool
-
-	errCh      chan error
-	blockCh    chan *BlockRef
-	deleteCh   chan *BareUri
-	followCh   chan *FollowRef
-	likeCh     chan *LikeRef
-	newskiesCh chan *BareUri
-	postCh     chan *PostRef
-	repostCh   chan *RepostRef
-}
 
 type BareUri struct {
 	Uri string
@@ -206,18 +191,31 @@ func getQuote(post *appbsky.FeedPost) string {
 	return ""
 }
 
-func (f *Firehose) Ack(seq int64) {
-	if seq > f.Cursor {
-		f.Cursor = seq
-
-		if (seq % 1000) == 0 {
-			f.saveCursor()
-		}
-	}
-
+func isHandledType(lextype string) bool {
+	_, err := lexutil.NewFromType(lextype)
+	return err == nil
 }
 
-func NewFirehose(ctx context.Context, client client.Client) *Firehose {
+type FirehoseEvent struct {
+	Block     *BlockRef
+	Delete    string
+	Follow    *FollowRef
+	Like      *LikeRef
+	Post      *PostRef
+	Profile   string
+	Repost    *RepostRef
+	Tombstone string
+	Info      *comatproto.SyncSubscribeRepos_Info
+	Error     error
+	Seq       int64
+	Type      string
+}
+
+type Firehose struct {
+	s *Subscriber
+}
+
+func NewFirehose(ctx context.Context) *Firehose {
 	bgs, ok := ctx.Value("bgs-host").(string)
 	if !ok {
 		bgs = DefaultBgsHost
@@ -236,463 +234,237 @@ func NewFirehose(ctx context.Context, client client.Client) *Firehose {
 	} else if scheme == "https" {
 		addr = "wss://"
 	} else {
-		log.Panicf("unsupported bgs scheme %s for bgs %s", scheme, bgs)
+		log.Panicf("unsupported scheme %s for labeler %s", scheme, bgs)
 	}
 	addr = addr + url.Host + "/xrpc/com.atproto.sync.subscribeRepos"
 
-	cursor, _ := ctx.Value("print-seq").(int64)
-	if cursor > 1 {
-		cursor--
-	}
-
 	cursorPath, _ := ctx.Value("cursor").(string)
+
 	return &Firehose{
-		addr:         addr,
-		Cursor:       cursor,
-		cursorPath:   cursorPath,
-		Client:       client,
-		con:          nil,
-		conCtx:       nil,
-		conCtxCancel: nil,
-		debug:        cmd.DebuggingEnabled(ctx, "firehose"),
-		mu:           sync.Mutex{},
-		errCh:        nil,
-		blockCh:      nil,
-		deleteCh:     nil,
-		followCh:     nil,
-		likeCh:       nil,
-		postCh:       nil,
-		repostCh:     nil,
+		s: NewSubscriber(addr, cursorPath),
 	}
 }
 
-func (f *Firehose) loadCursor() error {
-	p := f.cursorPath
-	if p == "" {
-		return nil
-	}
-
-	b, err := os.ReadFile(p)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-
-	cursor, err := strconv.ParseInt(strings.TrimSuffix(string(b), "\n"), 10, 64)
-	if err != nil {
-		return err
-	}
-
-	f.Cursor = cursor
-
-	return nil
+func (f *Firehose) Ack(seq int64) {
+	f.s.Ack(seq)
 }
 
-func (f *Firehose) saveCursor() error {
-	p := f.cursorPath
-	if p == "" {
-		return nil
-	}
+func (f *Firehose) proxyStream(sCh <-chan *SubscriberEvent) <-chan *FirehoseEvent {
+	fCh := make(chan *FirehoseEvent, 1)
 
-	c := f.Cursor
-	if c == 0 {
-		return nil
-	}
-
-	return utils.WriteFile(p, []byte(fmt.Sprintf("%d", c)))
-}
-
-func (f *Firehose) Start(ctx context.Context) error {
-	if (f.cursorPath != "") && (f.Cursor == 0) {
-		err := f.loadCursor()
-		if err != nil {
-			return err
-		}
-	}
-
-	if f.con == nil {
-		conCtx, cancel := context.WithCancel(ctx)
-		f.conCtx = conCtx
-		f.conCtxCancel = cancel
-
-		con, err := f.startStream()
-		if err != nil {
-			return err
-		}
-		f.con = con
-	}
-	return nil
-}
-
-func (f *Firehose) Restart(ctx context.Context) error {
-	conCtxCancel := f.conCtxCancel
-	if conCtxCancel != nil {
-		conCtxCancel()
-	}
-	if f.con != nil {
-		f.con.Close()
-		f.con = nil
-	}
-	return f.Start(ctx)
-}
-
-func isHandledType(lextype string) bool {
-	_, err := lexutil.NewFromType(lextype)
-	return err == nil
-}
-
-func (f *Firehose) consumeStream(con *websocket.Conn) bool {
-	ctx := f.conCtx
-	if f.debug {
-		fmt.Printf("> local conn=%s\n", con.LocalAddr().String())
-	}
-
-	first := true
-	lastSeq := f.Cursor
-	rsc := &events.RepoStreamCallbacks{
-		RepoCommit: func(evt *comatproto.SyncSubscribeRepos_Commit) error {
-			if first {
-				if f.debug {
-					fmt.Printf("saw first event: seq %d\n", evt.Seq)
-				}
-				first = false
-				if lastSeq == 0 {
-					lastSeq = evt.Seq
-				}
-			}
-			if evt.TooBig {
-				log.Printf("skipping too big events for now: %d\n", evt.Seq)
-				return nil
-			}
-			if (evt.Seq - lastSeq) > 1000 {
-				return fmt.Errorf("skipped too many seqs: went from %d to %d", lastSeq, evt.Seq)
-			}
-			lastSeq = evt.Seq
-
-			r, err := repo.ReadRepoFromCar(ctx, bytes.NewReader(evt.Blocks))
-			if err != nil {
-				return fmt.Errorf("reading repo from car (seq: %d, len: %d): %w", evt.Seq, len(evt.Blocks), err)
-			}
-			for _, op := range evt.Ops {
-				path := op.Path
-				parts := strings.SplitN(path, "/", 2)
-				lextype := parts[0]
-				uri := fmt.Sprintf("at://%s/%s", evt.Repo, path)
-				if !isHandledType(lextype) {
-					continue
-				}
-
-				ek := repomgr.EventKind(op.Action)
-				switch ek {
-				case repomgr.EvtKindCreateRecord, repomgr.EvtKindUpdateRecord:
-					rc, rec, err := r.GetRecord(ctx, op.Path)
-					if err != nil {
-						//e := fmt.Errorf("getting record %s (%s) within seq %d for %s: %w", op.Path, *op.Cid, evt.Seq, evt.Repo, err)
-						//log.Printf("%+v\n", e)
-						continue
-					}
-					if lexutil.LexLink(rc) != *op.Cid {
-						return fmt.Errorf("mismatch in record and op cid: %s != %s", rc, *op.Cid)
-					}
-					ref := &comatproto.RepoStrongRef{Cid: rc.String(), Uri: uri}
-					switch lextype {
-					case "app.bsky.feed.like":
-						like := &appbsky.FeedLike{}
-						if r, ok := rec.(*appbsky.FeedLike); ok {
-							like = r
-						} else {
-							err = utils.DecodeCBOR(rec, &like)
-							if err != nil {
-								log.Printf("error decoding %s: %+v", uri, err)
-								return nil
-							}
-						}
-						if f.likeCh != nil {
-							f.likeCh <- &LikeRef{like, ref, evt.Seq}
-						}
-					case "app.bsky.feed.post":
-						post := &appbsky.FeedPost{}
-						if r, ok := rec.(*appbsky.FeedPost); ok {
-							post = r
-						} else {
-							err = utils.DecodeCBOR(rec, &post)
-							if err != nil {
-								log.Printf("error decoding %s: %+v", uri, err)
-								return nil
-							}
-						}
-						if f.postCh != nil {
-							f.postCh <- NewPostRef(post, ref, evt.Seq)
-						}
-					case "app.bsky.feed.repost":
-						repost := &appbsky.FeedRepost{}
-						if r, ok := rec.(*appbsky.FeedRepost); ok {
-							repost = r
-						} else {
-							err = utils.DecodeCBOR(rec, &repost)
-							if err != nil {
-								log.Printf("error decoding %s: %+v", uri, err)
-								return nil
-							}
-						}
-						if f.repostCh != nil {
-							f.repostCh <- &RepostRef{repost, ref, evt.Seq}
-						}
-					case "app.bsky.actor.profile":
-						if (f.newskiesCh != nil) && (ek == repomgr.EvtKindCreateRecord) {
-							f.newskiesCh <- &BareUri{evt.Repo, evt.Seq}
-						}
-					case "app.bsky.graph.block":
-						block := &appbsky.GraphBlock{}
-						if r, ok := rec.(*appbsky.GraphBlock); ok {
-							block = r
-						} else {
-							err = utils.DecodeCBOR(rec, &block)
-							if err != nil {
-								log.Printf("error decoding %s: %+v", uri, err)
-								return nil
-							}
-						}
-						if (f.blockCh != nil) && (block.Subject == f.Client.Did()) {
-							f.blockCh <- &BlockRef{block.Subject, ref, evt.Seq}
-						}
-					case "app.bsky.graph.follow":
-						follow := &appbsky.GraphFollow{}
-						if r, ok := rec.(*appbsky.GraphFollow); ok {
-							follow = r
-						} else {
-							err = utils.DecodeCBOR(rec, &follow)
-							if err != nil {
-								log.Printf("error decoding %s: %+v", uri, err)
-								return nil
-							}
-						}
-						if f.followCh != nil {
-							f.followCh <- &FollowRef{follow.Subject, ref, evt.Seq}
-						}
-					}
-				case repomgr.EvtKindDeleteRecord:
-					if f.deleteCh != nil {
-						f.deleteCh <- &BareUri{uri, evt.Seq}
-					}
-				}
-			}
-			return nil
-		},
-		RepoHandle: func(evt *comatproto.SyncSubscribeRepos_Handle) error {
-			if first {
-				if f.debug {
-					fmt.Printf("saw first event: seq %d\n", evt.Seq)
-				}
-				first = false
-			}
-			return nil
-		},
-		RepoInfo: func(evt *comatproto.SyncSubscribeRepos_Info) error {
-			log.Printf("RepoInfo: %s\n", utils.Dump(evt))
-			return nil
-		},
-		RepoMigrate: func(evt *comatproto.SyncSubscribeRepos_Migrate) error {
-			if first {
-				if f.debug {
-					fmt.Printf("saw first event: seq %d\n", evt.Seq)
-				}
-				first = false
-			}
-			log.Printf("RepoMigrate: %s\n", utils.Dump(evt))
-			return nil
-		},
-		RepoTombstone: func(evt *comatproto.SyncSubscribeRepos_Tombstone) error {
-			if first {
-				if f.debug {
-					fmt.Printf("saw first event: seq %d\n", evt.Seq)
-				}
-				first = false
+	lastSeq := f.s.cursor
+	go func() {
+		for sEvt := range sCh {
+			lEvt := f.processSubscriberEvent(sEvt)
+			if lEvt == nil {
+				continue
 			}
 
-			if f.blockCh != nil {
-				uri := fmt.Sprintf("at://%s/tombstone/tombstone", evt.Did)
-				ref := &comatproto.RepoStrongRef{Uri: uri}
-				f.blockCh <- &BlockRef{f.Client.Did(), ref, evt.Seq}
+			seq := lEvt.Seq
+			if (lastSeq == 0) && (seq != 0) {
+				lastSeq = seq
 			}
 
-			return nil
-		},
-		LabelLabels: func(evt *comatproto.LabelSubscribeLabels_Labels) error {
-			if first {
-				if f.debug {
-					fmt.Printf("saw first event: seq %d\n", evt.Seq)
-				}
-				first = false
+			if (seq != 0) && ((seq - lastSeq) > 1000) {
+				err := fmt.Errorf("%w: skipped too many seqs: went from %d to %d (%d)", ErrFatal, lastSeq, seq, seq-lastSeq)
+				lEvt = &FirehoseEvent{Error: err, Type: EvtKindError}
 			}
-			log.Printf("LabelLabels: %s\n", utils.Dump(evt))
-			return nil
-		},
-		LabelInfo: func(evt *comatproto.LabelSubscribeLabels_Info) error {
-			log.Printf("LabelInfo: %s\n", utils.Dump(evt))
-			return nil
-		},
-		Error: func(errf *events.ErrorFrame) error {
-			err := fmt.Errorf("error frame: %s: %s", errf.Error, errf.Message)
-			if f.errCh != nil {
-				f.errCh <- err
+
+			fCh <- lEvt
+
+			if seq != 0 {
+				lastSeq = seq
 			}
-			return err
-		},
-	}
 
-	seqScheduler := sequential.NewScheduler(con.RemoteAddr().String(), rsc.EventHandler)
-	err := events.HandleRepoStream(ctx, con, seqScheduler)
-	if (err != nil) && !strings.Contains(err.Error(), "use of closed network connection") {
-		log.Printf("stream error %+v\n", err)
-
-		if f.errCh != nil {
-			f.errCh <- err
+			if (lEvt.Error != nil) && (errors.Is(lEvt.Error, ErrFatal)) {
+				break
+			}
 		}
 
-		if errors.Is(err, context.Canceled) {
-			seqScheduler.Shutdown()
-			return false
-		}
-	}
+		close(fCh)
+	}()
 
-	return true
+	return fCh
 }
 
-func (f *Firehose) startStream() (*websocket.Conn, error) {
-	addr := f.addr
-	c := f.Cursor
-	d := websocket.DefaultDialer
-	if c != 0 {
-		addr = fmt.Sprintf("%s?cursor=%d", addr, c)
-	}
-
-	con, _, err := d.Dial(addr, http.Header{})
+func (f *Firehose) Start(ctx context.Context) (<-chan *FirehoseEvent, error) {
+	ch, err := f.s.Start(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	go func() {
-		for f.con != nil {
-			if !f.consumeStream(con) {
-				return
-			}
-		}
-	}()
-	return con, nil
+	return f.proxyStream(ch), nil
 }
 
 func (f *Firehose) Stop() {
-	if f.conCtxCancel != nil {
-		f.conCtxCancel()
-	}
-	f.CloseConnection()
-	f.CloseChannels()
+	f.s.Stop()
+
 }
 
-func (f *Firehose) CloseConnection() {
-	if f.con != nil {
-		con := f.con
-		f.con = nil
-		con.Close()
-	}
-	err := f.saveCursor()
+func (f *Firehose) Restart(ctx context.Context) (<-chan *FirehoseEvent, error) {
+	ch, err := f.s.Restart(ctx)
 	if err != nil {
-		fmt.Printf("ERROR saving cursor %d to %s: %+v\n", f.Cursor, f.cursorPath, err)
-	} else {
-		fmt.Printf("SUCCESS saved cursor %d to %s\n", f.Cursor, f.cursorPath)
+		return nil, err
 	}
+
+	return f.proxyStream(ch), nil
 }
 
-func (f *Firehose) CloseChannels() {
-	if f.errCh != nil {
-		close(f.errCh)
-		f.errCh = nil
+func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent {
+	if sEvt.Error != nil {
+		return &FirehoseEvent{Error: sEvt.Error, Type: EvtKindError}
 	}
-	if f.blockCh != nil {
-		close(f.blockCh)
-		f.blockCh = nil
-	}
-	if f.deleteCh != nil {
-		close(f.deleteCh)
-		f.deleteCh = nil
-	}
-	if f.followCh != nil {
-		close(f.followCh)
-		f.followCh = nil
-	}
-	if f.likeCh != nil {
-		close(f.likeCh)
-		f.likeCh = nil
-	}
-	if f.newskiesCh != nil {
-		close(f.newskiesCh)
-		f.newskiesCh = nil
-	}
-	if f.postCh != nil {
-		close(f.postCh)
-		f.postCh = nil
-	}
-	if f.repostCh != nil {
-		close(f.repostCh)
-		f.repostCh = nil
-	}
-}
 
-func (f *Firehose) Errors() <-chan error {
-	if f.errCh == nil {
-		f.errCh = make(chan error, 1)
+	header := sEvt.Header
+	if header.Op != events.EvtKindMessage {
+		err := fmt.Errorf("unexpected header op: %d", header.Op)
+		return &FirehoseEvent{Error: err, Type: EvtKindError}
 	}
-	return f.errCh
 
-}
+	switch header.MsgType {
+	case "#handle":
+		var evt comatproto.SyncSubscribeRepos_Handle
+		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
+			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #handle: %w", err), Type: EvtKindError}
+		}
+		return &FirehoseEvent{Seq: evt.Seq, Type: header.MsgType}
+	case "#identity":
+		var evt comatproto.SyncSubscribeRepos_Identity
+		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
+			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #identity: %w", err), Type: EvtKindError}
+		}
+		return &FirehoseEvent{Seq: evt.Seq, Type: header.MsgType}
+	case "#info":
+		var evt comatproto.SyncSubscribeRepos_Info
+		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
+			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #info: %w", err), Type: EvtKindError}
+		}
+		return &FirehoseEvent{Info: &evt, Type: header.MsgType}
+	case "#migrate":
+		var evt comatproto.SyncSubscribeRepos_Migrate
+		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
+			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #migrate: %w", err), Type: EvtKindError}
+		}
+		return &FirehoseEvent{Seq: evt.Seq, Type: header.MsgType}
+	case "#tombstone":
+		var evt comatproto.SyncSubscribeRepos_Tombstone
+		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
+			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #tombstone: %w", err), Type: EvtKindError}
+		}
+		return &FirehoseEvent{Tombstone: evt.Did, Seq: evt.Seq, Type: header.MsgType}
+	case "#commit":
+		ctx := f.s.conCtx
 
-func (f *Firehose) Blocks() <-chan *BlockRef {
-	if f.blockCh == nil {
-		f.blockCh = make(chan *BlockRef, 1)
+		var evt comatproto.SyncSubscribeRepos_Commit
+		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
+			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #commit: %w", err), Type: EvtKindError}
+		}
+
+		if evt.TooBig {
+			log.Printf("skipping too big events for now: %d\n", evt.Seq)
+			return nil
+		}
+
+		r, err := repo.ReadRepoFromCar(ctx, bytes.NewReader(evt.Blocks))
+		if err != nil {
+			err = fmt.Errorf("reading repo from car (seq: %d, len: %d): %w", evt.Seq, len(evt.Blocks), err)
+			return &FirehoseEvent{Error: err, Type: EvtKindError}
+		}
+		for _, op := range evt.Ops {
+			path := op.Path
+			parts := strings.SplitN(path, "/", 2)
+			lextype := parts[0]
+			uri := fmt.Sprintf("at://%s/%s", evt.Repo, path)
+			if !isHandledType(lextype) {
+				continue
+			}
+
+			ek := repomgr.EventKind(op.Action)
+			switch ek {
+			case repomgr.EvtKindCreateRecord, repomgr.EvtKindUpdateRecord:
+				rc, rec, err := r.GetRecord(ctx, op.Path)
+				if err != nil {
+					//e := fmt.Errorf("getting record %s (%s) within seq %d for %s: %w", op.Path, *op.Cid, evt.Seq, evt.Repo, err)
+					//log.Printf("%+v\n", e)
+					continue
+				}
+				if lexutil.LexLink(rc) != *op.Cid {
+					err := fmt.Errorf("mismatch in record and op cid: %s != %s", rc, *op.Cid)
+					return &FirehoseEvent{Error: err, Type: EvtKindError}
+				}
+				ref := &comatproto.RepoStrongRef{Cid: rc.String(), Uri: uri}
+				switch lextype {
+				case "app.bsky.feed.like":
+					like := &appbsky.FeedLike{}
+					if r, ok := rec.(*appbsky.FeedLike); ok {
+						like = r
+					} else {
+						err = utils.DecodeCBOR(rec, &like)
+						if err != nil {
+							log.Printf("error decoding %s: %+v", uri, err)
+							return nil
+						}
+					}
+					return &FirehoseEvent{Seq: evt.Seq, Like: &LikeRef{like, ref, evt.Seq}, Type: EvtKindFirehoseLike}
+				case "app.bsky.feed.post":
+					post := &appbsky.FeedPost{}
+					if r, ok := rec.(*appbsky.FeedPost); ok {
+						post = r
+					} else {
+						err = utils.DecodeCBOR(rec, &post)
+						if err != nil {
+							log.Printf("error decoding %s: %+v", uri, err)
+							return nil
+						}
+					}
+					return &FirehoseEvent{Seq: evt.Seq, Post: NewPostRef(post, ref, evt.Seq), Type: EvtKindFirehosePost}
+				case "app.bsky.feed.repost":
+					repost := &appbsky.FeedRepost{}
+					if r, ok := rec.(*appbsky.FeedRepost); ok {
+						repost = r
+					} else {
+						err = utils.DecodeCBOR(rec, &repost)
+						if err != nil {
+							log.Printf("error decoding %s: %+v", uri, err)
+							return nil
+						}
+					}
+					return &FirehoseEvent{Seq: evt.Seq, Repost: &RepostRef{repost, ref, evt.Seq}, Type: EvtKindFirehoseRepost}
+				case "app.bsky.actor.profile":
+					if ek == repomgr.EvtKindCreateRecord {
+						return &FirehoseEvent{Seq: evt.Seq, Profile: evt.Repo, Type: EvtKindFirehoseProfile}
+					}
+				case "app.bsky.graph.block":
+					block := &appbsky.GraphBlock{}
+					if r, ok := rec.(*appbsky.GraphBlock); ok {
+						block = r
+					} else {
+						err = utils.DecodeCBOR(rec, &block)
+						if err != nil {
+							log.Printf("error decoding %s: %+v", uri, err)
+							return nil
+						}
+					}
+					return &FirehoseEvent{Seq: evt.Seq, Block: &BlockRef{block.Subject, ref, evt.Seq}, Type: EvtKindFirehoseBlock}
+				case "app.bsky.graph.follow":
+					follow := &appbsky.GraphFollow{}
+					if r, ok := rec.(*appbsky.GraphFollow); ok {
+						follow = r
+					} else {
+						err = utils.DecodeCBOR(rec, &follow)
+						if err != nil {
+							log.Printf("error decoding %s: %+v", uri, err)
+							return nil
+						}
+					}
+					return &FirehoseEvent{Seq: evt.Seq, Follow: &FollowRef{follow.Subject, ref, evt.Seq}, Type: EvtKindFirehoseFollow}
+				}
+			case repomgr.EvtKindDeleteRecord:
+				return &FirehoseEvent{Seq: evt.Seq, Delete: uri, Type: EvtKindFirehoseDelete}
+			}
+		}
+
 	}
-	return f.blockCh
-}
 
-func (f *Firehose) Deletes() <-chan *BareUri {
-	if f.deleteCh == nil {
-		f.deleteCh = make(chan *BareUri, 1)
-	}
-	return f.deleteCh
-}
-
-func (f *Firehose) Follows() <-chan *FollowRef {
-	if f.followCh == nil {
-		f.followCh = make(chan *FollowRef, 1)
-	}
-	return f.followCh
-}
-
-func (f *Firehose) Likes() <-chan *LikeRef {
-	if f.likeCh == nil {
-		f.likeCh = make(chan *LikeRef, 1)
-	}
-	return f.likeCh
-}
-
-func (f *Firehose) Newskies() <-chan *BareUri {
-	if f.newskiesCh == nil {
-		f.newskiesCh = make(chan *BareUri, 1)
-	}
-	return f.newskiesCh
-}
-
-func (f *Firehose) Posts() <-chan *PostRef {
-	if f.postCh == nil {
-		f.postCh = make(chan *PostRef, 1)
-	}
-	return f.postCh
-}
-
-func (f *Firehose) Reposts() <-chan *RepostRef {
-	if f.repostCh == nil {
-		f.repostCh = make(chan *RepostRef, 1)
-	}
-	return f.repostCh
+	return nil
 }

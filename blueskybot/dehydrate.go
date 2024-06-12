@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"syscall"
 
@@ -156,8 +157,12 @@ func deHydrateFollows(cctx *cli.Context) error {
 		return err
 	}
 
-	fmt.Printf("renaming dehydrated follows table %s to %s\n", dstFile.Name(), d.Follows.Path)
-	return os.Rename(dstFile.Name(), d.Follows.Path)
+	tableVal := reflect.ValueOf(d.Follows).Elem()
+	pathField := tableVal.FieldByName("path")
+	path := pathField.String()
+
+	fmt.Printf("renaming dehydrated follows table %s to %s\n", dstFile.Name(), path)
+	return os.Rename(dstFile.Name(), path)
 }
 
 func deHydratePosts(cctx *cli.Context) error {

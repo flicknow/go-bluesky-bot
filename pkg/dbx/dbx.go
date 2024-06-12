@@ -1,16 +1,21 @@
 package dbx
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
-	"sync"
+	"time"
 
+	"github.com/bluesky-social/indigo/api/atproto"
+	"github.com/bluesky-social/indigo/atproto/crypto"
 	"github.com/jmoiron/sqlx"
 	"github.com/flicknow/go-bluesky-bot/pkg/clock"
 	"github.com/flicknow/go-bluesky-bot/pkg/cmd"
@@ -25,7 +30,11 @@ var DefaultDbActorCacheSize = 500000
 var DefaultDbLabelCacheSize = 500000
 var DefaultDbFollowCacheSize = 50000
 
+var LabelerDid = "did:plc:jcce2sa3fgue4wiocvf7e7xj"
+var AMELIA_BUT_ALSO_ITS_REM = "did:plc:6gwchzxwoj7jms5nilauupxq"
 var MARK = "did:plc:wzsilnxf24ehtmmc3gssy5bu"
+var REM = "did:plc:asb3rgscdkkv636buq6blof6"
+var ʕ٠ᴥ٠ʔ = "did:plc:nhvvwh2qglcmsbvba7durp7f"
 var SQLiteMaxInt int64 = 9223372036854775807
 var PinnedFollowPostUrl = "at://did:plc:wzsilnxf24ehtmmc3gssy5bu/app.bsky.feed.post/3kexw5q5mix22"
 var PinnedFollowPost *PostRow = nil
@@ -35,8 +44,11 @@ var SQLiteDriver = "sqlite3_default"
 var SQLiteMMapSize = 0
 var SQLiteSynchronous = "NORMAL"
 
+var BangerRegex = regexp.MustCompile(`^\W*banger\b`)
+
 type DBx struct {
 	Actors           *DBxTableActors
+	CustomLabels     *DBxTableCustomLabels
 	Dms              *DBxTableDms
 	Follows          *DBxTableFollows
 	FollowsIndexed   *DBxTableFollowsIndexed
@@ -52,6 +64,7 @@ type DBx struct {
 	clock            clock.Clock
 	debug            bool
 	extendedIndexing bool
+	SigningKey       *crypto.PrivateKeyK256
 }
 
 func (d *DBx) Block(did string) error {
@@ -110,57 +123,43 @@ func uniqueInt64s(items []int64) []int64 {
 }
 
 func ParallelizeFuncsWithRetries(funcs ...func() error) []error {
-	var errCh = make(chan error, len(funcs))
-
-	var wg sync.WaitGroup
-	for _, f := range funcs {
-		wg.Add(1)
-		go func(g func() error) {
-			defer wg.Done()
-			errCh <- RetryDbIsLocked(g)
-		}(f)
+	retryableFuncs := make([]func() error, len(funcs))
+	for i, f := range funcs {
+		retryableFuncs[i] = RetryDbIsLocked(f)
 	}
 
-	go func() {
-		wg.Wait()
-		close(errCh)
-	}()
-
-	var errs = make([]error, 0, 0)
-	for err := range errCh {
-		if err != nil {
-			errs = append(errs, err)
-		}
-	}
-
-	return errs
+	return utils.ParallelizeFuncs(retryableFuncs...)
 }
 
-func RetryDbIsLocked(f func() error) error {
-	var err error = nil
-	for i := 0; i < 5; i++ {
-		err = f()
-		if err == nil {
-			return nil
-		} else if !(errors.Is(err, sqlite3.ErrBusy) || errors.Is(err, sqlite3.ErrLocked) || strings.Contains(err.Error(), "database is locked")) {
-			fmt.Printf("> RETRY RETURNING ERR: %+v\n", err)
-			return err
+func RetryDbIsLocked(f func() error) func() error {
+	return func() error {
+		var err error = nil
+		for i := 0; i < 5; i++ {
+			err = f()
+			if err == nil {
+				return nil
+			} else if !(errors.Is(err, sqlite3.ErrBusy) || errors.Is(err, sqlite3.ErrLocked) || strings.Contains(err.Error(), "database is locked")) {
+				fmt.Printf("> RETRY RETURNING ERR: %+v\n", err)
+				return err
+			}
+			fmt.Printf("> RETRY %d: %+v\n", i+1, err)
 		}
-		fmt.Printf("> RETRY %d: %+v\n", i+1, err)
+		fmt.Printf("> OUT OF RETRIES RETURNING ERR: %+v\n", err)
+		return err
 	}
-	fmt.Printf("> OUT OF RETRIES RETURNING ERR: %+v\n", err)
-	return err
 }
 
 func (d *DBx) InsertLike(likeRef *firehose.LikeRef) error {
-	if !d.extendedIndexing {
+	uri := likeRef.Ref.Uri
+	did := utils.ParseDid(uri)
+	isMark := did == MARK
+
+	if !(d.extendedIndexing || isMark) {
 		return nil
 	}
 
-	uri := likeRef.Ref.Uri
-
 	deferredActorId := NewDeferredInt64()
-	deferredPostId := NewDeferredInt64()
+	deferredPost := NewDeferredPost()
 
 	errs := ParallelizeFuncsWithRetries(
 		func() error {
@@ -176,21 +175,21 @@ func (d *DBx) InsertLike(likeRef *firehose.LikeRef) error {
 			return nil
 		},
 		func() error {
-			defer deferredPostId.Cancel()
+			defer deferredPost.Cancel()
 
-			postid, err := d.Posts.FindPostIdByUri(likeRef.Like.Subject.Uri)
+			post, err := d.Posts.FindByUri(likeRef.Like.Subject.Uri)
 			if err != nil {
 				return err
 			}
 
-			deferredPostId.Done(postid)
+			deferredPost.Done(post)
 
 			return nil
 		},
 		func() error {
 			actorid := deferredActorId.Get()
-			postid := deferredPostId.Get()
-			if (actorid == 0) || (postid == 0) {
+			post := deferredPost.Get()
+			if (actorid == 0) || (post == nil) {
 				return nil
 			}
 
@@ -198,7 +197,7 @@ func (d *DBx) InsertLike(likeRef *firehose.LikeRef) error {
 				ActorId:       actorid,
 				DehydratedUri: utils.DehydrateUri(uri),
 				Uri:           uri,
-				SubjectId:     postid,
+				SubjectId:     post.PostId,
 				CreatedAt:     d.clock.NowUnix(),
 			}
 
@@ -210,17 +209,73 @@ func (d *DBx) InsertLike(likeRef *firehose.LikeRef) error {
 			return nil
 		},
 		func() error {
-			postid := deferredPostId.Get()
-			if postid == 0 {
+			post := deferredPost.Get()
+			if post == nil {
 				return nil
 			}
 
+			postid := post.PostId
 			_, err := d.Posts.Exec("UPDATE posts SET likes = likes + 1 WHERE post_id = ?", postid)
 			if err != nil {
 				log.Printf("ERROR updating like count for post %d: %+v\n", postid, err)
 			}
 
 			return nil
+		},
+		func() error {
+			if !isMark {
+				return nil
+			}
+
+			post := deferredPost.Get()
+			if post == nil {
+				return nil
+			}
+
+			banger, err := d.Labels.FindOrCreateLabel("banger")
+			if err != nil {
+				log.Printf("ERROR retrieving banger label: %+v\n", err)
+				return nil
+			}
+
+			now := d.clock.NowUnix()
+			ver := int64(1)
+			label := &atproto.LabelDefs_Label{
+				Cts: time.Unix(now, 0).UTC().Format(time.RFC3339),
+				Src: LabelerDid,
+				Uri: utils.HydrateUri(post.DehydratedUri, "app.bsky.feed.post"),
+				Val: "banger",
+				Ver: &ver,
+			}
+
+			sigBuf := new(bytes.Buffer)
+			err = label.MarshalCBOR(sigBuf)
+			if err != nil {
+				return err
+			}
+
+			sigBytes, err := d.SigningKey.HashAndSign(sigBuf.Bytes())
+			if err != nil {
+				return err
+			}
+			label.Sig = sigBytes
+
+			cborBuf := new(bytes.Buffer)
+			err = label.MarshalCBOR(cborBuf)
+			if err != nil {
+				return err
+			}
+
+			row := &CustomLabel{
+				SubjectType: PostLabelType,
+				SubjectId:   post.PostId,
+				CreatedAt:   now,
+				LabelId:     banger.LabelId,
+				Neg:         0,
+				Cbor:        cborBuf.Bytes(),
+			}
+
+			return d.CustomLabels.InsertLabels([]*CustomLabel{row})
 		},
 	)
 	if len(errs) > 0 {
@@ -331,6 +386,12 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 	quote := postRef.Quotes
 	uri := postRef.Ref.Uri
 	now := d.clock.NowUnix()
+
+	if (post.Labels != nil) && (post.Labels.LabelDefs_SelfLabels != nil) {
+		for _, selfLabel := range post.Labels.LabelDefs_SelfLabels.Values {
+			labels = append(labels, selfLabel.Val)
+		}
+	}
 
 	parentUri := ""
 	if (post.Reply != nil) && (post.Reply.Parent != nil) {
@@ -741,6 +802,64 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 			return nil
 		},
 		func() error {
+			did := utils.ParseDid(uri)
+			if did != ʕ٠ᴥ٠ʔ {
+				return nil
+			}
+
+			if !BangerRegex.MatchString(post.Text) {
+				return nil
+			}
+
+			parent := deferredParent.Get()
+			if parent == nil {
+				return nil
+			}
+
+			banger, err := d.Labels.FindOrCreateLabel("banger")
+			if err != nil {
+				log.Printf("ERROR retrieving banger label: %+v\n", err)
+				return nil
+			}
+			now := d.clock.NowUnix()
+			ver := int64(1)
+			label := &atproto.LabelDefs_Label{
+				Cts: time.Unix(now, 0).UTC().Format(time.RFC3339),
+				Src: LabelerDid,
+				Uri: parentUri,
+				Val: "banger",
+				Ver: &ver,
+			}
+
+			sigBuf := new(bytes.Buffer)
+			err = label.MarshalCBOR(sigBuf)
+			if err != nil {
+				return err
+			}
+
+			sigBytes, err := d.SigningKey.HashAndSign(sigBuf.Bytes())
+			if err != nil {
+				return err
+			}
+			label.Sig = sigBytes
+
+			cborBuf := new(bytes.Buffer)
+			err = label.MarshalCBOR(cborBuf)
+			if err != nil {
+				return err
+			}
+
+			row := &CustomLabel{
+				SubjectType: PostLabelType,
+				SubjectId:   parent.PostId,
+				CreatedAt:   now,
+				LabelId:     banger.LabelId,
+				Cbor:        cborBuf.Bytes(),
+			}
+
+			return d.CustomLabels.InsertLabels([]*CustomLabel{row})
+		},
+		func() error {
 			if !d.extendedIndexing {
 				return nil
 			}
@@ -1115,7 +1234,10 @@ func (d *DBx) DeletePost(uri string) error {
 }
 
 func (d *DBx) DeleteLike(uri string) error {
-	if !d.extendedIndexing {
+	did := utils.ParseDid(uri)
+	isMark := did == MARK
+
+	if !(d.extendedIndexing || isMark) {
 		return nil
 	}
 
@@ -1135,6 +1257,68 @@ func (d *DBx) DeleteLike(uri string) error {
 		func() error {
 			_, err := d.Posts.Exec("UPDATE posts SET likes = likes - 1 WHERE post_id = $1", likerow.SubjectId)
 			return err
+		},
+		func() error {
+			if !isMark {
+				return nil
+			}
+
+			banger, err := d.Labels.FindOrCreateLabel("banger")
+			if err != nil {
+				log.Printf("ERROR retrieving banger label: %+v\n", err)
+				return nil
+			}
+
+			posts, err := d.Posts.SelectPostsById([]int64{likerow.SubjectId})
+			if err != nil {
+				log.Printf("ERROR retrieving banger post %d: %+v\n", likerow.SubjectId, err)
+				return nil
+			}
+			if len(posts) != 1 {
+				return nil
+			}
+
+			post := posts[0]
+			now := d.clock.NowUnix()
+			neg := true
+			ver := int64(1)
+			label := &atproto.LabelDefs_Label{
+				Cts: time.Unix(now, 0).UTC().Format(time.RFC3339),
+				Src: LabelerDid,
+				Uri: utils.HydrateUri(post.DehydratedUri, "app.bsky.feed.post"),
+				Val: "banger",
+				Neg: &neg,
+				Ver: &ver,
+			}
+
+			sigBuf := new(bytes.Buffer)
+			err = label.MarshalCBOR(sigBuf)
+			if err != nil {
+				return err
+			}
+
+			sigBytes, err := d.SigningKey.HashAndSign(sigBuf.Bytes())
+			if err != nil {
+				return err
+			}
+			label.Sig = sigBytes
+
+			cborBuf := new(bytes.Buffer)
+			err = label.MarshalCBOR(cborBuf)
+			if err != nil {
+				return err
+			}
+
+			row := &CustomLabel{
+				SubjectType: PostLabelType,
+				SubjectId:   likerow.SubjectId,
+				CreatedAt:   now,
+				LabelId:     banger.LabelId,
+				Neg:         1,
+				Cbor:        cborBuf.Bytes(),
+			}
+
+			return d.CustomLabels.InsertLabels([]*CustomLabel{row})
 		},
 	)
 	if len(errs) > 0 {
@@ -1519,7 +1703,7 @@ func (d *DBx) selectMentions(before int64, limit int, actorid int64) ([]*PostRow
 			return nil
 		},
 		func() error {
-			rows, err := d.Replies.SelectRepliesByActorId(actorid, before, limit)
+			rows, err := d.Replies.SelectRepliesToActorId(actorid, before, limit)
 			if err != nil {
 				return nil
 			}
@@ -1588,6 +1772,38 @@ func (d *DBx) SelectMentions(before int64, limit int, did string) ([]*PostRow, e
 	}
 
 	return mentions, nil
+}
+
+func (d *DBx) SelectQuotesForUri(uri string) ([]*PostRow, error) {
+	post, err := d.Posts.FindByUri(uri)
+	if err != nil {
+		return nil, err
+	}
+	if (post == nil) || (post.PostId == 0) {
+		return nil, nil
+	}
+
+	last := SQLiteMaxInt
+	quotes := make([]int64, 0)
+	chunk := 100
+	for {
+		ids, err := d.Quotes.SelectQuotesBySubjectId(post.PostId, last, chunk)
+		if err != nil {
+			return nil, err
+		}
+		if ids == nil {
+			break
+		}
+
+		quotes = append(quotes, ids...)
+		if len(quotes) < chunk {
+			break
+		}
+
+		last = quotes[len(quotes)-1]
+	}
+
+	return d.Posts.SelectPostsById(quotes)
 }
 
 func (d *DBx) SelectQuotes(before int64, limit int, did string) ([]*PostRow, error) {
@@ -1668,6 +1884,226 @@ func (d *DBx) selectFollows(actorid int64) ([]int64, bool, error) {
 
 	f.cache.Add(lastid, &followCacheEntry{follows: follows, last: lastid})
 	return follows, indexed, nil
+}
+
+func (d *DBx) selectActorsWithBirthdays(actorids []int64) ([]int64, error) {
+	if (actorids == nil) || (len(actorids) == 0) {
+		return []int64{}, nil
+	}
+
+	birthdayboys := make([]int64, 0, len(actorids))
+	birthday, err := d.Labels.FindOrCreateLabel("birthday")
+	if err != nil {
+		return nil, err
+	}
+
+	actoridStrings := make([]string, len(actorids))
+	for i, actorid := range actorids {
+		actoridStrings[i] = fmt.Sprintf("%d", actorid)
+	}
+
+	q := fmt.Sprintf(
+		`
+	  SELECT
+	    subject_id
+	  FROM
+		custom_labels
+	  WHERE
+		neg = 0
+		AND label_id = $1
+		AND subject_id IN (%s)
+		AND subject_type = $2
+	  ORDER BY
+		custom_label_id DESC
+		`,
+		strings.Join(actoridStrings, ","),
+	)
+
+	err = d.CustomLabels.DB.Select(&birthdayboys, q, birthday.LabelId, AccountLabelType)
+	if err != nil {
+		return nil, err
+	}
+
+	return birthdayboys, nil
+}
+
+func (d *DBx) selectAllBirthdays() ([]int64, error) {
+	label, err := d.Labels.FindOrCreateLabel("birthday")
+	if err != nil {
+		return nil, err
+	}
+
+	chunk := 100
+	var since int64 = 0
+	birthdayboys := make([]int64, 0)
+	for {
+		birthdays, err := d.CustomLabels.SelectLabelsByLabelIdAndNeg(label.LabelId, false, since, chunk)
+		if err != nil {
+			return nil, err
+		}
+		if birthdays == nil {
+			return birthdayboys, nil
+		}
+
+		for _, birthday := range birthdays {
+			if birthday.SubjectType != AccountLabelType {
+				continue
+			}
+
+			birthdayboys = append(birthdayboys, birthday.SubjectId)
+		}
+
+		if len(birthdays) < chunk {
+			return birthdayboys, nil
+		}
+
+		since = birthdays[len(birthdays)-1].CustomLabelId
+	}
+}
+
+func (d *DBx) SelectBangers(before int64, limit int) ([]*PostRow, error) {
+	if before == 0 {
+		before = SQLiteMaxInt
+	}
+
+	banger, err := d.Labels.FindOrCreateLabel("banger")
+	if err != nil {
+		return nil, err
+	}
+
+	labels := make([]*CustomLabel, 0, limit)
+	err = d.CustomLabels.Select(
+		&labels,
+		"SELECT * FROM custom_labels WHERE label_id = $1 AND neg = 0 AND subject_type = $2 AND custom_label_id < $3 ORDER BY custom_label_id DESC LIMIT $4",
+		banger.LabelId,
+		PostLabelType,
+		before,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	postIds := make([]int64, 0, len(labels))
+	for _, label := range labels {
+		postIds = append(postIds, label.SubjectId)
+	}
+
+	posts, err := d.Posts.SelectPostsById(postIds)
+	if err != nil {
+		return nil, err
+	}
+
+	postIdToPost := make(map[int64]*PostRow)
+	for _, post := range posts {
+		postIdToPost[post.PostId] = post
+	}
+
+	sortedPosts := make([]*PostRow, 0, len(posts))
+	for _, label := range labels {
+		post := postIdToPost[label.SubjectId]
+		if post == nil {
+			continue
+		}
+		// set postid to customlabelid to use customlabelid as cursor
+		post.PostId = label.CustomLabelId
+		sortedPosts = append(sortedPosts, post)
+	}
+
+	return sortedPosts, nil
+}
+
+func (d *DBx) SelectBirthdays(before int64, limit int) ([]*PostRow, error) {
+	birthdayboys, err := d.selectAllBirthdays()
+	if err != nil {
+		return nil, err
+	}
+
+	birthdays := make([]*PostRow, 0, limit)
+
+	done := false
+	for !done {
+		posts, err := d.Posts.SelectPostsByActorIds(birthdayboys, before, limit)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, post := range posts {
+			birthdays = append(birthdays, post)
+		}
+
+		if (len(posts) < limit) || (len(birthdays) >= limit) {
+			done = true
+			break
+		}
+
+		before = posts[len(posts)-1].PostId
+	}
+
+	return birthdays, nil
+}
+
+func (d *DBx) SelectBirthdaysFollowed(before int64, limit int, did string) ([]*PostRow, error) {
+	actor, err := d.Actors.FindOrCreateActor(did)
+	if err != nil {
+		return nil, err
+	}
+	if actor.Blocked {
+		return nil, nil
+	}
+	actorid := actor.ActorId
+	if actorid == 0 {
+		return nil, nil
+	}
+
+	follows, indexed, err := d.selectFollows(actorid)
+	if err != nil {
+		return nil, err
+	}
+
+	birthdayboys, err := d.selectActorsWithBirthdays(follows)
+	if err != nil {
+		return nil, err
+	}
+
+	birthdays := make([]*PostRow, 0, limit)
+	if (!indexed) && (PinnedFollowPost != nil) {
+		return []*PostRow{PinnedFollowPost}, nil
+	} else if (birthdayboys == nil) || (len(birthdayboys) == 0) {
+		return []*PostRow{}, nil
+	}
+
+	var isbirthdayboy map[int64]bool = nil
+
+	done := false
+	for !done {
+		posts, err := d.Posts.SelectPostsByActorIds(birthdayboys, before, limit)
+		if err != nil {
+			return nil, err
+		}
+
+		if isbirthdayboy == nil {
+			isbirthdayboy = make(map[int64]bool)
+			for _, birthdayboy := range birthdayboys {
+				isbirthdayboy[birthdayboy] = true
+			}
+		}
+
+		for _, post := range posts {
+			if isbirthdayboy[post.ActorId] {
+				birthdays = append(birthdays, post)
+			}
+		}
+
+		if (len(posts) < limit) || (len(birthdays) >= limit) {
+			done = true
+			break
+		}
+
+		before = posts[len(posts)-1].PostId
+	}
+
+	return birthdays, nil
 }
 
 func (d *DBx) SelectAllMentionsFollowed(before int64, limit int, did string) ([]*PostRow, error) {
@@ -2043,12 +2479,105 @@ func (d *DBx) SelectLatestPosts(before int64, limit int) ([]*PostRow, error) {
 	return posts, nil
 }
 
+func (d *DBx) SelectOnlyPosts(before int64, limit int, dids []string) ([]*PostRow, error) {
+	actors, err := d.Actors.FindOrCreateActors(dids)
+	if err != nil {
+		return nil, err
+	}
+
+	actorids := make([]int64, len(actors))
+	for i, actor := range actors {
+		actorids[i] = actor.ActorId
+	}
+
+	return d.selectOnlyPosts(actorids, before, limit)
+}
+
+func (d *DBx) selectOnlyPosts(actorids []int64, before int64, limit int) ([]*PostRow, error) {
+	isReply := make(map[int64]bool)
+	onlyPosts := make([]*PostRow, 0)
+	posts := make([]*PostRow, 0)
+
+	if before == 0 {
+		before = SQLiteMaxInt
+	}
+	var lastPost int64 = before
+	var lastReply int64 = before
+
+	for {
+		errs := ParallelizeFuncsWithRetries(
+			func() error {
+				var err error = nil
+				posts, err = d.Posts.SelectPostsByActorIds(actorids, lastPost, limit)
+				return err
+			},
+			func() error {
+				if (lastPost - int64(limit)) >= lastReply {
+					return nil
+				}
+
+				replies, err := d.Replies.SelectRepliesFromActorIds(actorids, lastPost, limit)
+				if err != nil {
+					return err
+				}
+				if (replies == nil) || (len(replies) == 0) {
+					return nil
+				}
+
+				lastReply = replies[len(replies)-1]
+				for _, reply := range replies {
+					isReply[reply] = true
+				}
+
+				return nil
+			},
+		)
+		if len(errs) > 0 {
+			msg := fmt.Sprintf("Error selecting only posts for actor ids %+v:", actorids)
+			for _, e := range errs {
+				msg = fmt.Sprintf("%s\n%s", msg, e)
+			}
+			log.Print(msg)
+			return nil, errors.New(msg)
+		}
+		if len(posts) == 0 {
+			return onlyPosts, nil
+		}
+
+		for _, post := range posts {
+			if isReply[post.PostId] {
+				continue
+			}
+			onlyPosts = append(onlyPosts, post)
+		}
+
+		if len(onlyPosts) >= limit {
+			return onlyPosts[:limit], nil
+		}
+
+		lastPost = posts[len(posts)-1].PostId
+	}
+}
+
 func (d *DBx) selectMark(actorid int64, markid int64, before int64, limit int) ([]*PostRow, bool, error) {
+	toplevel := make([]int64, 0, limit)
 	mentions := make([]int64, 0, limit)
 	quotes := make([]int64, 0, limit)
 	replies := make([]int64, 0, limit)
 
 	errs := ParallelizeFuncsWithRetries(
+		func() error {
+			posts, err := d.selectOnlyPosts([]int64{markid}, before, limit)
+			if err != nil {
+				return err
+			}
+
+			for _, post := range posts {
+				toplevel = append(toplevel, post.PostId)
+			}
+
+			return nil
+		},
 		func() error {
 			err := d.Mentions.Select(&mentions, "SELECT post_id FROM mentions WHERE actor_id = $1 AND subject_id = $2 AND post_id < $3 ORDER BY post_id DESC LIMIT $4", markid, actorid, before, limit)
 			if err != nil {
@@ -2080,7 +2609,7 @@ func (d *DBx) selectMark(actorid int64, markid int64, before int64, limit int) (
 		return nil, false, errors.New(msg)
 	}
 
-	postids := uniqueInt64s(concatInt64s(mentions, quotes, replies))
+	postids := uniqueInt64s(concatInt64s(toplevel, mentions, quotes, replies))
 	posts, err := d.Posts.SelectPostsById(postids)
 	if err != nil {
 		return nil, false, err
@@ -2206,6 +2735,202 @@ func (d *DBx) SelectPostLabels(since int64, limit int) ([]*LabelDef, error) {
 
 	return labelDefs, nil
 }
+func (d *DBx) RecordBirthdayLabels(t clock.Clock) error {
+	now := time.Unix(t.NowUnix(), 0)
+	endWindow := now.AddDate(-1, 0, 0)
+	startWindow := endWindow.Add(-10 * time.Minute)
+
+	actors, err := d.Actors.SelectActorsWithirthdaysBetween(startWindow.Unix(), endWindow.Unix())
+	if err != nil {
+		return err
+	}
+
+	bday, err := d.Labels.FindOrCreateLabel("birthday")
+	if err != nil {
+		return err
+	}
+
+	labels := make([]*CustomLabel, len(actors))
+	for i, actor := range actors {
+		ver := int64(1)
+		label := &atproto.LabelDefs_Label{
+			Cts: now.UTC().Format(time.RFC3339),
+			Src: LabelerDid,
+			Uri: actor.Did,
+			Val: "birthday",
+			Ver: &ver,
+		}
+
+		sigBuf := new(bytes.Buffer)
+		err := label.MarshalCBOR(sigBuf)
+		if err != nil {
+			return err
+		}
+
+		sigBytes, err := d.SigningKey.HashAndSign(sigBuf.Bytes())
+		if err != nil {
+			return err
+		}
+		label.Sig = sigBytes
+
+		cborBuf := new(bytes.Buffer)
+		err = label.MarshalCBOR(cborBuf)
+		if err != nil {
+			return err
+		}
+
+		labels[i] = &CustomLabel{
+			SubjectType: AccountLabelType,
+			SubjectId:   actor.ActorId,
+			CreatedAt:   now.Unix(),
+			LabelId:     bday.LabelId,
+			Neg:         0,
+			Cbor:        cborBuf.Bytes(),
+		}
+	}
+
+	return d.CustomLabels.InsertLabels(labels)
+}
+
+func (d *DBx) RecordUnbirthdayLabels(t clock.Clock) error {
+	now := time.Unix(t.NowUnix(), 0)
+	endWindow := now.AddDate(-1, 0, -1)
+	startWindow := endWindow.Add(-10 * time.Minute)
+
+	actors, err := d.Actors.SelectActorsWithirthdaysBetween(startWindow.Unix(), endWindow.Unix())
+	if err != nil {
+		return err
+	}
+
+	actoridStrings := make([]string, len(actors))
+	for i, actor := range actors {
+		actoridStrings[i] = fmt.Sprintf("%d", actor.ActorId)
+	}
+
+	bday, err := d.Labels.FindOrCreateLabel("birthday")
+	if err != nil {
+		return err
+	}
+
+	labels := make([]*CustomLabel, 0, len(actors))
+	for _, actor := range actors {
+		did := actor.Did
+		if (did == REM) || (did == AMELIA_BUT_ALSO_ITS_REM) {
+			// it is always rem's birthday
+			continue
+		}
+
+		neg := true
+		ver := int64(1)
+		label := &atproto.LabelDefs_Label{
+			Cts: now.UTC().Format(time.RFC3339),
+			Src: LabelerDid,
+			Uri: did,
+			Val: "birthday",
+			Neg: &neg,
+			Ver: &ver,
+		}
+
+		sigBuf := new(bytes.Buffer)
+		err := label.MarshalCBOR(sigBuf)
+		if err != nil {
+			return err
+		}
+
+		sigBytes, err := d.SigningKey.HashAndSign(sigBuf.Bytes())
+		if err != nil {
+			return err
+		}
+		label.Sig = sigBytes
+
+		cborBuf := new(bytes.Buffer)
+		err = label.MarshalCBOR(cborBuf)
+		if err != nil {
+			return err
+		}
+
+		labels = append(
+			labels,
+			&CustomLabel{
+				SubjectType: AccountLabelType,
+				SubjectId:   actor.ActorId,
+				CreatedAt:   now.Unix(),
+				LabelId:     bday.LabelId,
+				Neg:         1,
+				Cbor:        cborBuf.Bytes(),
+			})
+	}
+
+	err = d.CustomLabels.InsertLabels(labels)
+	if err != nil {
+		return err
+	}
+
+	_, err = d.CustomLabels.Exec(
+		fmt.Sprintf(
+			`
+			DELETE FROM
+			custom_labels
+		  WHERE
+			label_id = $1
+			AND neg = 0
+			AND subject_type = $2
+			AND subject_id IN (%s)
+			`,
+			strings.Join(actoridStrings, ","),
+		),
+		bday.LabelId,
+		AccountLabelType,
+	)
+
+	return err
+}
+
+func (d *DBx) PruneCustomLabels(t clock.Clock) error {
+	now := time.Unix(t.NowUnix(), 0)
+	end := now.AddDate(0, 0, -7)
+
+	_, err := d.CustomLabels.Exec(
+		"DELETE FROM custom_labels WHERE created_at < ?",
+		end.Unix(),
+	)
+
+	return err
+}
+
+func (d *DBx) SelectLastCustomLabelId() (int64, error) {
+	var lastid int64
+	row := d.CustomLabels.QueryRowx("SELECT custom_label_id FROM custom_labels ORDER BY custom_label_id DESC LIMIT 1")
+	err := row.Scan(&lastid)
+	if err != nil {
+		return 0, err
+	}
+	return lastid, nil
+}
+
+func (d *DBx) SelectCustomLabels(before int64, limit int) ([]*CustomLabel, error) {
+
+	customLabels, err := d.CustomLabels.SelectLabels(before, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	return customLabels, nil
+}
+
+func (d *DBx) SelectCustomAccountLabels(labelName string, before int64, limit int) ([]*CustomLabel, error) {
+	label, err := d.Labels.FindOrCreateLabel(labelName)
+	if err != nil {
+		return nil, err
+	}
+
+	customLabels, err := d.CustomLabels.SelectLabelsByLabelId(label.LabelId, before, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	return customLabels, nil
+}
 
 func (d *DBx) InitActorInfo(actorrow *ActorRow, postlabels []*PostLabelRow) error {
 	res, err := d.Actors.NamedExec("UPDATE actors SET blocked = :blocked, created_at=:created_at, last_post=:last_post, posts=:posts WHERE actor_id=:actor_id", actorrow)
@@ -2330,8 +3055,22 @@ func NewDBx(ctx context.Context) *DBx {
 		SlowQueryThresholdMs = threshold
 	}
 
+	signingKeyHex := []byte(ctx.Value("signing-key").(string))
+
+	signingKeyBytes := make([]byte, hex.DecodedLen(len(signingKeyHex)))
+	_, err = hex.Decode(signingKeyBytes, signingKeyHex)
+	if err != nil {
+		panic(err)
+	}
+
+	signingKey, err := crypto.ParsePrivateBytesK256(signingKeyBytes)
+	if err != nil {
+		panic(err)
+	}
+
 	d := &DBx{
 		Actors:           NewActorTable(dir, actorCacheSize),
+		CustomLabels:     NewCustomLabelTable(dir),
 		Dms:              NewDmTable(dir),
 		Follows:          NewFollowsTable(dir, followCacheSize),
 		FollowsIndexed:   NewFollowsIndexedTable(dir),
@@ -2347,6 +3086,7 @@ func NewDBx(ctx context.Context) *DBx {
 		clock:            clk,
 		debug:            cmd.DebuggingEnabled(ctx, "db"),
 		extendedIndexing: extendedIndexing,
+		SigningKey:       signingKey,
 	}
 
 	if PinnedFollowPost == nil {

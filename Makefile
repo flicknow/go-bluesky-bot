@@ -2,14 +2,13 @@ BUILD     = build
 EXE       = blueskybot
 IMAGE     = flicknow/blueskybot
 PORT      = 8777
-RESTART   = on-failure
+RESTART   = always
 TAG       = latest
 VOLUME    = blueskybot-db
 CONTAINER = blueskybot
 DRYRUN    = 1
 ENV       = .env
 DEBUG     = 0
-SUBSCRIBE_LABELS_PORT = 8779
 VARNISH_PORT = 8778
 DOCKER_RUN = docker run --init --security-opt seccomp=unconfined --log-driver local --env-file $(ENV)
 
@@ -72,7 +71,7 @@ fmt:
 pull-image:
 	docker pull $(IMAGE):$(TAG)
 
-deploy: pull-image deploy-bot deploy-server deploy-subscribe-labels
+deploy: pull-image deploy-bot deploy-server
 
 deploy-bot:
 	-@docker stop $(CONTAINER)-bot && docker rm $(CONTAINER)-bot
@@ -85,10 +84,6 @@ deploy-follow-indexer:
 deploy-server:
 	-@docker stop $(CONTAINER)-server && docker rm $(CONTAINER)-server
 	$(DOCKER_RUN) -d --name $(CONTAINER)-server --restart $(RESTART) --publish $(PORT):8080 --volume $(VOLUME):/var/db $(IMAGE):$(TAG) /$(EXE) server
-
-deploy-subscribe-labels:
-	-@docker stop $(CONTAINER)-subscribe-labels && docker rm $(CONTAINER)-subscribe-labels
-	$(DOCKER_RUN) -d --name $(CONTAINER)-subscribe-labels --restart $(RESTART) --publish $(SUBSCRIBE_LABELS_PORT):8080 --volume $(VOLUME):/var/db $(IMAGE):$(TAG) /$(EXE) server
 
 deploy-varnish:
 	-@docker stop $(CONTAINER)-varnish && docker rm $(CONTAINER)-varnish

@@ -12,12 +12,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bluesky-social/indigo/api/atproto"
 	"github.com/flicknow/go-bluesky-bot/pkg/client"
 	"github.com/flicknow/go-bluesky-bot/pkg/cmd"
 	"github.com/flicknow/go-bluesky-bot/pkg/dbx"
 	"github.com/flicknow/go-bluesky-bot/pkg/firehose"
 	"github.com/flicknow/go-bluesky-bot/pkg/indexer"
 	"github.com/flicknow/go-bluesky-bot/pkg/ticker"
+	"github.com/flicknow/go-bluesky-bot/pkg/utils"
 	cli "github.com/urfave/cli/v2"
 )
 
@@ -64,28 +66,21 @@ var BlueskyBot = &cli.Command{
 		indexer.Start()
 		defer indexer.Stop()
 
-		firehose := firehose.NewFirehose(cmd.ToContext(cctx), client)
-		errCh := firehose.Errors()
-		blockCh := firehose.Blocks()
-		deleteCh := firehose.Deletes()
-		followCh := firehose.Follows()
-		likeCh := firehose.Likes()
-		newskiesCh := firehose.Newskies()
-		postCh := firehose.Posts()
-		repostCh := firehose.Reposts()
-
-		server := NewServer(cctx.String("listen"), indexer, cctx.Int64("max-web-connections"), cctx.String("pinned-post"))
+		server := NewServer(cmd.ToContext(cctx), indexer)
 		go server.Serve()
-		defer server.Shutdown(context.Background())
+		defer server.Shutdown(ctx)
 
-		err = firehose.Start(ctx)
+		hose := firehose.NewFirehose(cmd.ToContext(cctx))
+		fCh, err := hose.Start(ctx)
+
+		labeler := firehose.NewLabelerFirehose(cmd.ToContext(cctx))
+		lCh, err := labeler.Start(ctx)
 		if err != nil {
 			return err
 		}
-		log.Printf("STARTING cursor = %d\n", firehose.Cursor)
 		defer func() {
-			firehose.Stop()
-			log.Printf("STOPPED cursor = %d\n", firehose.Cursor)
+			hose.Stop()
+			labeler.Stop()
 		}()
 
 		defer func() {
@@ -95,111 +90,229 @@ var BlueskyBot = &cli.Command{
 			}
 		}()
 
-		// run until we're shutting down and all the channels are empty
-		var lastPing int64 = firehose.Cursor
+		var lastFirehosePing int64 = 0
+		var lastLabelerPing int64 = 0
 		var lastPostId int64 = 0
-		var lastSeen int64 = 0
-		pinger := ticker.NewTicker(1 * time.Minute)
+		var lastFirehoseSeen int64 = 0
+		var lastLabelerSeen int64 = 0
 		shutdown := false
-		for !(shutdown && chanEmpty(errCh, blockCh, deleteCh, followCh, likeCh, newskiesCh, postCh, repostCh)) {
+
+		pinger := ticker.NewTicker(1 * time.Minute)
+		go func() {
+			for range pinger.C {
+				log.Printf("> last seen post=%d, seq=%d (%d)\n", lastPostId, lastFirehoseSeen, lastFirehoseSeen-lastFirehosePing)
+				if lastFirehosePing == lastFirehoseSeen {
+					panic("restarting firehose!")
+				}
+				if lastLabelerPing == lastLabelerSeen {
+					fmt.Println("> restarting labeler!")
+					var err error
+					lCh, err = labeler.Restart(ctx)
+					if err != nil {
+						panic(err)
+					}
+				}
+				lastFirehosePing = lastFirehoseSeen
+				lastLabelerPing = lastLabelerSeen
+			}
+		}()
+		defer func() { pinger.Stop() }()
+
+	LOOP:
+		for !shutdown {
 			select {
-			case err := <-errCh:
-				if (err != nil) && (!errors.Is(err, context.Canceled)) {
-					log.Printf("received firehose error: %+v, restarting\n", err)
-					if shutdown {
-						firehose.CloseChannels()
-					} else {
-						err := firehose.Restart(ctx)
+			case <-ctx.Done():
+				fmt.Println("Interrupt!")
+				return nil
+			case evt := <-lCh:
+				if evt == nil {
+					fmt.Println("> END OF LOOP")
+					break LOOP
+				}
+
+				switch evt.Type {
+				case firehose.EvtKindError:
+					err := evt.Error
+					if err == nil {
+						continue
+					}
+					if errors.Is(err, context.Canceled) {
+						continue
+					}
+
+					if errors.Is(err, firehose.ErrFatal) {
+						log.Printf("received labeler firehose error: %+v, restarting\n", err)
+
+						var err error
+						lCh, err = labeler.Restart(ctx)
 						if err != nil {
 							return err
 						}
+					} else {
+						log.Printf("received labeler firehose error: %+v\n", err)
 					}
-				}
-			case blockRef := <-blockCh:
-				if blockRef != nil {
-					lastSeen = blockRef.Seq
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Block(blockRef) })
-					if err == nil {
-						firehose.Ack(blockRef.Seq)
+				case firehose.EvtKindLabelerInfo:
+					info := evt.Info
+					if info == nil {
+						continue
 					}
-				}
-			case deleted := <-deleteCh:
-				if deleted != nil {
-					lastSeen = deleted.Seq
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Delete(deleted.Uri) })
-					if err == nil {
-						firehose.Ack(deleted.Seq)
-					}
-				}
-			case follow := <-followCh:
-				if follow != nil {
-					lastSeen = follow.Seq
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Follow(follow) })
-					if err == nil {
-						firehose.Ack(follow.Seq)
+					fmt.Println(utils.Dump(info))
+				case firehose.EvtKindLabel:
+					labels := evt.Labels
+					if labels == nil {
+						continue
 					}
 
-				}
-			case likeRef := <-likeCh:
-				if likeRef != nil {
-					lastSeen = likeRef.Seq
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Like(likeRef) })
-					if err == nil {
-						firehose.Ack(likeRef.Seq)
+					err := dbx.RetryDbIsLocked(func() error { return indexer.Label(labels.Labels) })()
+					if err != nil {
+						continue
 					}
 				}
-			case newskie := <-newskiesCh:
-				if newskie != nil {
-					lastSeen = newskie.Seq
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Newskie(newskie.Uri) })
-					if err == nil {
-						firehose.Ack(newskie.Seq)
+
+				seq := evt.Seq
+				if seq != 0 {
+					labeler.Ack(seq)
+					lastLabelerSeen = seq
+					if lastLabelerPing == 0 {
+						lastLabelerPing = seq
 					}
 				}
-			case postRef := <-postCh:
-				if postRef != nil {
-					lastSeen = postRef.Seq
-					err = dbx.RetryDbIsLocked(func() error {
+			case evt := <-fCh:
+				if evt == nil {
+					fmt.Println("> END OF LOOP")
+					break LOOP
+				}
+
+				switch evt.Type {
+				case firehose.EvtKindError:
+					err := evt.Error
+					if err == nil {
+						continue
+					}
+					if errors.Is(err, context.Canceled) {
+						continue
+					}
+
+					if errors.Is(err, firehose.ErrFatal) {
+						log.Printf("received firehose error: %+v, restarting\n", err)
+
+						var err error
+						fCh, err = hose.Restart(ctx)
+						if err != nil {
+							return err
+						}
+					} else {
+						log.Printf("received firehose error: %+v\n", err)
+					}
+				case firehose.EvtKindFirehoseLike:
+					likeRef := evt.Like
+					if likeRef == nil {
+						continue
+					}
+
+					err := dbx.RetryDbIsLocked(func() error { return indexer.Like(likeRef) })()
+					if err != nil {
+						continue
+					}
+				case firehose.EvtKindFirehosePost:
+					postRef := evt.Post
+					if postRef == nil {
+						continue
+					}
+
+					err := dbx.RetryDbIsLocked(func() error {
 						post, err := indexer.Post(postRef)
 						if err != nil {
 							return err
 						}
-						if post != nil {
+
+						if (post != nil) && (post.PostId != 0) {
 							lastPostId = post.PostId
 						}
+
 						return nil
-					})
-					if err == nil {
-						firehose.Ack(postRef.Seq)
-					}
-				}
-			case repostRef := <-repostCh:
-				if repostRef != nil {
-					lastSeen = repostRef.Seq
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Repost(repostRef) })
-					if err == nil {
-						firehose.Ack(repostRef.Seq)
-					}
-				}
-			case <-pinger.C:
-				log.Printf("> last seen post=%d, seq=%d (%d)\n", lastPostId, lastSeen, lastSeen-lastPing)
-				if lastPing == lastSeen {
-					fmt.Println("> restarting!")
-					err := firehose.Restart(ctx)
+					})()
 					if err != nil {
-						return err
+						continue
 					}
-				}
-				lastPing = lastSeen
-				report := dbx.Collector.Report()
-				if report != "" {
-					fmt.Println(report)
+				case firehose.EvtKindFirehoseRepost:
+					repostRef := evt.Repost
+					if repostRef == nil {
+						continue
+					}
+
+					err := dbx.RetryDbIsLocked(func() error { return indexer.Repost(repostRef) })()
+					if err != nil {
+						continue
+					}
+				case firehose.EvtKindFirehoseProfile:
+					newskie := evt.Profile
+					if newskie == "" {
+						continue
+					}
+
+					err := dbx.RetryDbIsLocked(func() error { return indexer.Newskie(newskie) })()
+					if err != nil {
+						continue
+					}
+				case firehose.EvtKindFirehoseBlock:
+					blockRef := evt.Block
+					if blockRef == nil {
+						continue
+					}
+
+					err := dbx.RetryDbIsLocked(func() error { return indexer.Block(blockRef) })()
+					if err != nil {
+						continue
+					}
+				case firehose.EvtKindFirehoseFollow:
+					followRef := evt.Follow
+					if followRef == nil {
+						continue
+					}
+
+					err := dbx.RetryDbIsLocked(func() error { return indexer.Follow(followRef) })()
+					if err != nil {
+						continue
+					}
+				case firehose.EvtKindFirehoseDelete:
+					deleted := evt.Delete
+					if deleted == "" {
+						continue
+					}
+
+					err := dbx.RetryDbIsLocked(func() error { return indexer.Delete(deleted) })()
+					if err != nil {
+						continue
+					}
+				case firehose.EvtKindFirehoseTombstone:
+					tombstone := evt.Tombstone
+					if tombstone == "" {
+						continue
+					}
+
+					blockRef := &firehose.BlockRef{
+						Subject: client.Did(),
+						Ref: &atproto.RepoStrongRef{
+							Uri: fmt.Sprintf("at://%s/tombstone/tombstone", tombstone),
+						},
+					}
+
+					err := dbx.RetryDbIsLocked(func() error { return indexer.Block(blockRef) })()
+					if err != nil {
+						continue
+					}
 				}
 
-			case <-ctx.Done():
-				fmt.Println("Interrupt!")
-				firehose.CloseConnection()
-				shutdown = true
+				seq := evt.Seq
+				if seq != 0 {
+					hose.Ack(seq)
+					lastFirehoseSeen = seq
+					if lastFirehosePing == 0 {
+						lastFirehosePing = seq
+					}
+				}
+
 			}
 		}
 

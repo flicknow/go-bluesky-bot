@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/api/bsky"
 	"github.com/flicknow/go-bluesky-bot/pkg/client"
 	"github.com/flicknow/go-bluesky-bot/pkg/clock"
@@ -27,16 +28,18 @@ type Indexer struct {
 	Client client.Client
 	Db     *dbx.DBx
 
-	clock             clock.Clock
-	debug             bool
-	extendedIndexing  bool
-	keepSeconds       int64
-	pruneChunk        int
-	labelTickMinutes  int64
-	prunerTickMinutes int64
-	labelTicker       *ticker.Ticker
-	prunerTicker      *ticker.Ticker
-	wg                *sync.WaitGroup
+	clock                    clock.Clock
+	debug                    bool
+	extendedIndexing         bool
+	keepSeconds              int64
+	pruneChunk               int
+	customLabelerTickMinutes int64
+	labelTickMinutes         int64
+	prunerTickMinutes        int64
+	customLabelerTicker      *ticker.Ticker
+	labelTicker              *ticker.Ticker
+	prunerTicker             *ticker.Ticker
+	wg                       *sync.WaitGroup
 }
 
 func NewIndexer(ctx context.Context, client client.Client) (*Indexer, error) {
@@ -57,6 +60,11 @@ func NewIndexer(ctx context.Context, client client.Client) (*Indexer, error) {
 		pruneChunk = 30
 	}
 
+	customLabelerTickMinutes, ok := ctx.Value("custom-labeler-tick-minutes").(int64)
+	if !ok {
+		customLabelerTickMinutes = 1
+	}
+
 	labelTickMinutes, ok := ctx.Value("label-tick-minutes").(int64)
 	if !ok {
 		labelTickMinutes = 1
@@ -68,15 +76,16 @@ func NewIndexer(ctx context.Context, client client.Client) (*Indexer, error) {
 	}
 
 	indexer := &Indexer{
-		Client:            client,
-		clock:             clk,
-		debug:             cmd.DebuggingEnabled(ctx, "indexer"),
-		keepSeconds:       keepDays * 24 * 60 * 60,
-		pruneChunk:        pruneChunk,
-		labelTickMinutes:  labelTickMinutes,
-		prunerTickMinutes: prunerTickMinutes,
-		extendedIndexing:  extendedIndexing,
-		wg:                &sync.WaitGroup{},
+		Client:                   client,
+		clock:                    clk,
+		debug:                    cmd.DebuggingEnabled(ctx, "indexer"),
+		keepSeconds:              keepDays * 24 * 60 * 60,
+		pruneChunk:               pruneChunk,
+		customLabelerTickMinutes: customLabelerTickMinutes,
+		labelTickMinutes:         labelTickMinutes,
+		prunerTickMinutes:        prunerTickMinutes,
+		extendedIndexing:         extendedIndexing,
+		wg:                       &sync.WaitGroup{},
 	}
 
 	indexer.Db = dbx.NewDBx(ctx)
@@ -85,6 +94,11 @@ func NewIndexer(ctx context.Context, client client.Client) (*Indexer, error) {
 }
 
 func (i *Indexer) Start() {
+	if (i.customLabelerTicker == nil) && (i.customLabelerTickMinutes != 0) {
+		i.customLabelerTicker = ticker.NewTicker(time.Duration(i.customLabelerTickMinutes) * time.Minute)
+	}
+	go i.runCustomLabeler()
+
 	if (i.labelTicker == nil) && (i.labelTickMinutes != 0) {
 		i.labelTicker = ticker.NewTicker(time.Duration(i.labelTickMinutes) * time.Minute)
 	}
@@ -98,6 +112,11 @@ func (i *Indexer) Start() {
 }
 
 func (i *Indexer) Stop() {
+	if i.customLabelerTicker != nil {
+		customLabelerTicker := i.customLabelerTicker
+		i.customLabelerTicker = nil
+		customLabelerTicker.Stop()
+	}
 	if i.labelTicker != nil {
 		labelTicker := i.labelTicker
 		i.labelTicker = nil
@@ -268,7 +287,7 @@ func (i *Indexer) runLabelerOnceForLabels(rateLimit int64) (int64, error) {
 			return labelHits, nil
 		}
 
-		posts, err := i.Label(cutoff, 25)
+		posts, err := i.BatchLabel(cutoff, 25)
 		if err != nil {
 			return labelHits, err
 		}
@@ -384,6 +403,117 @@ func (i *Indexer) runLabelerOnce(rateLimit int64) {
 	}
 }
 
+func (i *Indexer) runCustomLabeler() {
+	wg := i.wg
+	wg.Add(1)
+	defer wg.Done()
+
+	ticker := i.customLabelerTicker
+	if ticker == nil {
+		return
+	}
+
+	for range ticker.C {
+		i.runCustomLabelerOnce()
+	}
+}
+
+func (i *Indexer) InitializeActorBirthdays(limit int64) error {
+	cutoff := int64(0)
+	chunk := 100
+
+	count := int64(0)
+	for {
+		if i.customLabelerTicker == nil {
+			return nil
+		}
+
+		actors, err := i.InitializeActorBirthdaysOnce(cutoff, chunk)
+		if err != nil {
+			return err
+		}
+		if len(actors) < chunk {
+			return nil
+		}
+
+		if limit != 0 {
+			count += int64(len(actors))
+			if count >= limit {
+				return nil
+			}
+		}
+	}
+}
+
+func (i *Indexer) InitializeActorBirthdaysOnce(cutoff int64, chunk int) ([]*dbx.ActorRow, error) {
+	actors, err := i.Db.Actors.SelectActorsWithoutBirthdays(cutoff, chunk)
+	if err != nil {
+		return nil, err
+	}
+	if len(actors) == 0 {
+		return []*dbx.ActorRow{}, nil
+	}
+	for _, actor := range actors {
+		did := actor.Did
+		createdAt, err := LookupDidPlcCreatedAt(did)
+		if err != nil {
+			return nil, err
+		}
+
+		if createdAt == 0 {
+			actor.Blocked = true
+			err = i.Db.InitActorInfo(actor, []*dbx.PostLabelRow{})
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		_, err = i.Db.Actors.InitializeBirthday(did, createdAt)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return actors, nil
+}
+
+func (i *Indexer) runCustomLabelerOnce() {
+	errs := utils.ParallelizeFuncs(
+		func() error {
+			err := i.InitializeActorBirthdays(0)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		},
+		func() error {
+			clock := i.clock
+			err := i.Db.RecordBirthdayLabels(clock)
+			if err != nil {
+				return err
+			}
+
+			err = i.Db.RecordUnbirthdayLabels(clock)
+			if err != nil {
+				return err
+			}
+
+			err = i.Db.PruneCustomLabels(clock)
+
+			return nil
+		},
+	)
+	if len(errs) > 0 {
+		msg := "Error running custom labeler:"
+		for _, e := range errs {
+			msg = fmt.Sprintf("%s\n%s", msg, e)
+		}
+		log.Print(msg)
+	}
+}
+
 func (i *Indexer) runLabeler() {
 	wg := i.wg
 	wg.Add(1)
@@ -400,7 +530,7 @@ func (i *Indexer) runLabeler() {
 	}
 }
 
-func (i *Indexer) Label(cutoff int64, limit int) ([]bsky.FeedDefs_PostView, error) {
+func (i *Indexer) BatchLabel(cutoff int64, limit int) ([]bsky.FeedDefs_PostView, error) {
 	db := i.Db
 	rows, err := db.Posts.SelectUnlabeled(cutoff, limit)
 	if err != nil {
@@ -459,6 +589,45 @@ func (i *Indexer) Label(cutoff int64, limit int) ([]bsky.FeedDefs_PostView, erro
 	}
 
 	return posts, nil
+}
+
+func (i *Indexer) Label(labels []*atproto.LabelDefs_Label) error {
+	uriToPostId := make(map[string]int64)
+	postIdToLabels := make(map[int64][]string)
+
+	for _, label := range labels {
+		uri := label.Uri
+
+		postid := uriToPostId[uri]
+		if postid == 0 {
+			var err error
+			postid, err = i.Db.Posts.FindPostIdByUri(uri)
+			if err != nil {
+				return err
+			}
+			if postid == 0 {
+				continue
+			}
+
+			uriToPostId[uri] = postid
+		}
+
+		labels := postIdToLabels[postid]
+		if labels == nil {
+			labels = make([]string, 0, 1)
+		}
+
+		postIdToLabels[postid] = append(labels, label.Val)
+	}
+
+	for postid, labels := range postIdToLabels {
+		err := i.Db.LabelPost(postid, labels)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (i *Indexer) InitUninitializedActors(rateLimit int64, cutoff int64, limit int) ([]*dbx.ActorRow, int64, error) {
@@ -599,7 +768,11 @@ func (i *Indexer) Delete(uri string) error {
 }
 
 func (i *Indexer) Like(likeRef *firehose.LikeRef) error {
-	if !i.extendedIndexing {
+	uri := likeRef.Ref.Uri
+	did := utils.ParseDid(uri)
+	isMark := did == dbx.MARK
+
+	if !(i.extendedIndexing || isMark) {
 		return nil
 	}
 
@@ -814,6 +987,15 @@ func (i *Indexer) Post(postRef *firehose.PostRef) (*dbx.PostRow, error) {
 
 	if strings.Contains(postRef.Post.Text, "‼") && (actor.Did == REM) {
 		labels = append(labels, "rembangs")
+	}
+
+	selfLabels := postRef.Post.Labels
+	if (selfLabels != nil) && (selfLabels.LabelDefs_SelfLabels != nil) && (selfLabels.LabelDefs_SelfLabels.Values != nil) {
+		for _, value := range selfLabels.LabelDefs_SelfLabels.Values {
+			if (value != nil) && (value.Val != "") {
+				labels = append(labels, value.Val)
+			}
+		}
 	}
 
 	post, err := i.Db.InsertPost(postRef, actor, labels...)

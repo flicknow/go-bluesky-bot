@@ -107,6 +107,52 @@ func (d *DBxTablePosts) FindPostIdByUri(uri string) (int64, error) {
 	return postid, nil
 }
 
+func (d *DBxTablePosts) SelectPostsByActorId(actorid int64, before int64, limit int) ([]*PostRow, error) {
+	postrows := make([]*PostRow, 0, limit)
+	err := d.Select(&postrows, "SELECT * FROM posts WHERE actor_id = $1 AND post_id < $2 ORDER BY post_id DESC LIMIT $3", actorid, before, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, post := range postrows {
+		post.Uri = utils.HydrateUri(post.DehydratedUri, "app.bsky.feed.post")
+
+	}
+
+	return postrows, nil
+}
+
+func (d *DBxTablePosts) SelectPostsByActorIds(actorids []int64, before int64, limit int) ([]*PostRow, error) {
+	posts := make([]*PostRow, 0, len(actorids))
+
+	if len(actorids) == 0 {
+		return posts, nil
+	}
+
+	params := make([]any, 0, len(actorids)+2)
+	params = append(params, before)
+
+	plcs := make([]string, len(actorids))
+	for i, actorid := range actorids {
+		params = append(params, actorid)
+		plcs[i] = "?"
+	}
+	params = append(params, limit)
+
+	q := fmt.Sprintf("SELECT * FROM posts WHERE post_id < ? AND actor_id IN (%s) ORDER BY post_id DESC LIMIT ?", strings.Join(plcs, ", "))
+	err := d.Select(&posts, q, params...)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, post := range posts {
+		post.Uri = utils.HydrateUri(post.DehydratedUri, "app.bsky.feed.post")
+
+	}
+
+	return posts, nil
+}
+
 func (d *DBxTablePosts) SelectPostsById(postids []int64) ([]*PostRow, error) {
 	posts := make([]*PostRow, 0, len(postids))
 
@@ -183,17 +229,9 @@ func (d *DBxTablePosts) SelectUnlabeled(cutoff int64, limit int) ([]*PostRow, er
 }
 
 func (d *DBxTablePosts) MarkLabeled(postid int64) error {
-	res, err := d.Exec("UPDATE posts SET labeled = 1 WHERE post_id = ?", postid)
+	_, err := d.Exec("UPDATE posts SET labeled = 1 WHERE post_id = ?", postid)
 	if err != nil {
 		return err
-	}
-
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected != int64(1) {
-		return fmt.Errorf("did not mark post %d labeled", postid)
 	}
 
 	return nil

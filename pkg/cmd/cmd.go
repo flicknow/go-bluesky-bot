@@ -142,13 +142,19 @@ var WithDb = CombineFlags(
 		EnvVars:  []string{"GO_BLUESKY_SLOW_QUERY_THRESHOLD_MS"},
 		Required: false,
 	},
+	&cli.StringFlag{
+		Name:     "signing-key",
+		Usage:    "signing key for labeler",
+		EnvVars:  []string{"GO_BLUESKY_SIGNING_KEY_HEX"},
+		Required: true,
+	},
 	WithDebug,
 )
 
 var WithIndexer = CombineFlags(
 	&cli.StringFlag{
 		Name:    "bgs-host",
-		Usage:   "method, hostname, and port of PDBGSS instance",
+		Usage:   "method, hostname, and port of BGS instance",
 		Value:   "https://bsky.network",
 		EnvVars: []string{"ATP_BGS_HOST"},
 	},
@@ -157,6 +163,18 @@ var WithIndexer = CombineFlags(
 		Usage:   "path to cursor",
 		Value:   fmt.Sprintf("%s/.bsky.cursor", os.Getenv("HOME")),
 		EnvVars: []string{"GO_BLUESKY_CURSOR"},
+	},
+	&cli.StringFlag{
+		Name:    "mod-host",
+		Usage:   "method, hostname, and port of moderation instance",
+		Value:   "https://mod.bsky.app",
+		EnvVars: []string{"GO_BLUESKY_MOD_HOST"},
+	},
+	&cli.StringFlag{
+		Name:    "mod-cursor",
+		Usage:   "path to cursor for moderation service",
+		Value:   fmt.Sprintf("%s/.bsky.mod.cursor", os.Getenv("HOME")),
+		EnvVars: []string{"GO_BLUESKY_MOD_CURSOR"},
 	},
 	&cli.Int64Flag{
 		Name:    "keep-days",

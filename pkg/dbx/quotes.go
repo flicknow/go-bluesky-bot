@@ -60,6 +60,40 @@ func (d *DBxTableQuotes) FindByPostId(postid int64) (*QuoteRow, error) {
 	return quote, nil
 }
 
+func (d *DBxTableQuotes) SelectQuotesBySubjectId(subjectid int64, before int64, limit int) ([]int64, error) {
+	q := `
+SELECT
+	post_id
+FROM
+	quotes
+WHERE
+	subject_id = $1
+	AND post_id < $2
+ORDER BY
+	post_id DESC
+LIMIT
+	$3
+`
+
+	quotes := make([]int64, 0, limit)
+	rows, err := d.Queryx(q, subjectid, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		mention := &ThreadMentionRow{}
+		err = rows.StructScan(&mention)
+		if err != nil {
+			return nil, err
+		}
+		quotes = append(quotes, mention.PostId)
+	}
+
+	return quotes, nil
+}
+
 func (d *DBxTableQuotes) SelectQuotesByActorId(actorid int64, before int64, limit int) ([]int64, error) {
 	q := `
 SELECT

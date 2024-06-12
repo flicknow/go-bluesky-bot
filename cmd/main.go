@@ -20,12 +20,14 @@ func main() {
 		Version: "0.0.1",
 	}
 	app.Commands = []*cli.Command{
+		blueskybot.BirthdayCmd,
 		blueskybot.BlockCmd,
 		blueskybot.BlueskyBot,
 		blueskybot.DelayCmd,
 		blueskybot.DehydrateCmd,
 		blueskybot.DumpCmd,
 		blueskybot.FirstCmd,
+		blueskybot.IndexBirthdaysCmd,
 		blueskybot.IndexCmd,
 		blueskybot.IndexFollowsCmd,
 		blueskybot.LookupCmd,
@@ -33,6 +35,7 @@ func main() {
 		blueskybot.MigrateListCmd,
 		blueskybot.PruneCmd,
 		blueskybot.ServerCmd,
+		blueskybot.SubscribeLabelsCmd,
 	}
 
 	go func() {

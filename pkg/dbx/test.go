@@ -2,6 +2,7 @@ package dbx
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"sort"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
+	"github.com/bluesky-social/indigo/atproto/crypto"
 
 	"github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/api/bsky"
@@ -154,8 +156,14 @@ func NewTestDBxContext(ctx context.Context) (*testDBx, func()) {
 		panic(err)
 	}
 
+	priv, err := crypto.GeneratePrivateKeyK256()
+	if err != nil {
+		panic(err)
+	}
+
 	ctx = context.WithValue(ctx, "db-dir", dir)
 	ctx = context.WithValue(ctx, "extended-indexing", true)
+	ctx = context.WithValue(ctx, "signing-key", hex.EncodeToString(priv.Bytes()))
 
 	return &testDBx{NewDBx(ctx)}, func() { os.RemoveAll(dir) }
 }

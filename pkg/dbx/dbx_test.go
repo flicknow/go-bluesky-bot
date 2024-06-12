@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/flicknow/go-bluesky-bot/pkg/clock"
@@ -587,7 +588,8 @@ func TestDBxSelectMark(t *testing.T) {
 	quote := d.CreatePost(&TestPostRefInput{Actor: mark.Did, Quote: post.Uri})
 
 	other := d.CreateActor()
-	d.CreatePost(&TestPostRefInput{Actor: mark.Did, Mentions: []string{other.Did}})
+	otherPost := d.CreatePost(&TestPostRefInput{Actor: other.Did})
+	d.CreatePost(&TestPostRefInput{Actor: mark.Did, Reply: otherPost.Uri})
 
 	feed, err := d.SelectMark(SQLiteMaxInt, 10, actor.Did)
 	if err != nil {
@@ -924,4 +926,64 @@ func TestDBxInsertDeletedMentions(t *testing.T) {
 		CollectPostIds([]*PostRow{reply, quote}),
 		CollectPostIds(threadmentions),
 	)
+}
+
+func TestDBxSelectOnlyPosts(t *testing.T) {
+	d, cleanup := NewTestDBx()
+	defer cleanup()
+
+	actor := d.CreateActor()
+	posts := make([]*PostRow, 0)
+
+	posts = append(posts, d.CreatePost(&TestPostRefInput{Actor: actor.Did}))
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+	posts = append(posts, d.CreatePost(&TestPostRefInput{Actor: actor.Did}))
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+	posts = append(posts, d.CreatePost(&TestPostRefInput{Actor: actor.Did}))
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+	posts = append(posts, d.CreatePost(&TestPostRefInput{Actor: actor.Did}))
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+	posts = append(posts, d.CreatePost(&TestPostRefInput{Actor: actor.Did}))
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+	posts = append(posts, d.CreatePost(&TestPostRefInput{Actor: actor.Did}))
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: posts[len(posts)-1].Uri})
+
+	slices.Reverse(posts)
+
+	only, err := d.selectOnlyPosts([]int64{actor.ActorId}, SQLiteMaxInt, 2)
+	if err != nil {
+		panic(err)
+	}
+	assert.Equal(
+		t,
+		CollectPostIds(posts[:2]),
+		CollectPostIds(only),
+	)
+
+	only, err = d.selectOnlyPosts([]int64{actor.ActorId}, only[len(only)-1].PostId, 2)
+	if err != nil {
+		panic(err)
+	}
+	assert.Equal(
+		t,
+		CollectPostIds(posts[2:4]),
+		CollectPostIds(only),
+	)
+
+	only, err = d.selectOnlyPosts([]int64{actor.ActorId}, only[len(only)-1].PostId, 2)
+	if err != nil {
+		panic(err)
+	}
+	assert.Equal(
+		t,
+		CollectPostIds(posts[4:6]),
+		CollectPostIds(only),
+	)
+
 }

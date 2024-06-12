@@ -8,6 +8,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 
 	lexutil "github.com/bluesky-social/indigo/lex/util"
 	cbg "github.com/whyrusleeping/cbor-gen"
@@ -146,4 +147,31 @@ func SortInt64s(unsorted []int64) []int64 {
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 
 	return sorted
+}
+
+func ParallelizeFuncs(funcs ...func() error) []error {
+	var errCh = make(chan error, len(funcs))
+
+	var wg sync.WaitGroup
+	for _, f := range funcs {
+		wg.Add(1)
+		go func(g func() error) {
+			defer wg.Done()
+			errCh <- g()
+		}(f)
+	}
+
+	go func() {
+		wg.Wait()
+		close(errCh)
+	}()
+
+	var errs = make([]error, 0, 0)
+	for err := range errCh {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errs
 }

@@ -1,4 +1,4 @@
-FROM golang:1.21.3-alpine as build
+FROM golang:1.22.2-alpine as build
 ARG DEBUG=0
 RUN apk update \
  && apk add gcc libc-dev

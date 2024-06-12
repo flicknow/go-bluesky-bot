@@ -1,11 +1,13 @@
 package blueskybot
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"net"
@@ -14,10 +16,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/bluesky-social/indigo/api/atproto"
+	"github.com/bluesky-social/indigo/events"
 	"github.com/gorilla/websocket"
 	"github.com/flicknow/go-bluesky-bot/pkg/client"
 	"github.com/flicknow/go-bluesky-bot/pkg/cmd"
@@ -31,6 +35,7 @@ import (
 
 var upgrader = websocket.Upgrader{}
 var ErrUnauthorized = fmt.Errorf("ERROR: UNAUTHORIZED")
+var LabelerDid = "did:plc:jcce2sa3fgue4wiocvf7e7xj"
 
 type Server struct {
 	Indexer               *indexer.Indexer
@@ -38,18 +43,44 @@ type Server struct {
 	pinnedPost            string
 	server                *http.Server
 	sem                   *semaphore.Weighted
-	ticker                *ticker.Ticker
+	tickermu              sync.Mutex
+	tickers               map[*ticker.Ticker]bool
 }
 
 func (s *Server) Serve() error {
 	return s.server.ListenAndServe()
 }
 
-func (s *Server) Shutdown(ctx context.Context) error {
-	ticker := s.ticker
-	s.ticker = nil
-	ticker.Stop()
+func (s *Server) addTicker(d time.Duration) *ticker.Ticker {
+	s.tickermu.Lock()
+	defer s.tickermu.Unlock()
 
+	t := ticker.NewTicker(d)
+	s.tickers[t] = true
+
+	return t
+}
+
+func (s *Server) removeTicker(t *ticker.Ticker) {
+	s.tickermu.Lock()
+	defer s.tickermu.Unlock()
+
+	delete(s.tickers, t)
+}
+
+func (s *Server) stopTickers() {
+	s.tickermu.Lock()
+	defer s.tickermu.Unlock()
+
+	tickers := s.tickers
+	for t, _ := range tickers {
+		t.Stop()
+		delete(tickers, t)
+	}
+}
+
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.stopTickers()
 	return s.server.Shutdown(ctx)
 }
 
@@ -208,6 +239,16 @@ func (s *Server) generateFeed(w http.ResponseWriter, indexer *indexer.Indexer, d
 			}
 			posts, err = indexer.Db.SelectAllMentionsFollowed(cursor, limit, did)
 			vary = "authorization"
+		} else if label == "bangers" {
+			posts, err = indexer.Db.SelectBangers(cursor, limit)
+		} else if label == "birthdays" {
+			posts, err = indexer.Db.SelectBirthdays(cursor, limit)
+		} else if label == "f-birthdays" {
+			if did == "" {
+				return ErrUnauthorized
+			}
+			posts, err = indexer.Db.SelectBirthdaysFollowed(cursor, limit, did)
+			vary = "authorization"
 		} else if label == "dms" {
 			if did == "" {
 				return ErrUnauthorized
@@ -247,7 +288,7 @@ func (s *Server) generateFeed(w http.ResponseWriter, indexer *indexer.Indexer, d
 		}
 
 		return err
-	})
+	})()
 	if (err != nil) && errors.Is(err, ErrUnauthorized) {
 		Unauthorized(w)
 		return
@@ -338,21 +379,38 @@ func getDidFromRequest(r *http.Request) (string, error) {
 	return jwt.Iss, nil
 }
 
-func writeSubscribeLabels(c *websocket.Conn, labels []*dbx.LabelDef) error {
+func (s *Server) writeSubscribeLabels(c *websocket.Conn, labels []*dbx.CustomLabel) error {
 	subscribeLabels := &atproto.LabelSubscribeLabels_Labels{}
-	subscribeLabels.Seq = labels[len(labels)-1].PostLabelId
+	subscribeLabels.Seq = labels[len(labels)-1].CustomLabelId
 	subscribeLabels.Labels = make([]*atproto.LabelDefs_Label, 0)
 
 	for _, label := range labels {
-		subscribeLabel := &atproto.LabelDefs_Label{
-			Cts: time.Unix(label.CreatedAt, 0).UTC().Format(time.RFC3339),
-			Uri: label.Uri,
-			Val: label.Val,
+		r := bytes.NewReader(label.Cbor)
+		subscribeLabel := &atproto.LabelDefs_Label{}
+		err := subscribeLabel.UnmarshalCBOR(r)
+		if err != nil {
+			return err
 		}
+
 		subscribeLabels.Labels = append(subscribeLabels.Labels, subscribeLabel)
 	}
 
-	return c.WriteJSON(subscribeLabels)
+	buf := new(bytes.Buffer)
+	header := events.EventHeader{
+		Op:      events.EvtKindMessage,
+		MsgType: "#labels",
+	}
+	err := header.MarshalCBOR(buf)
+	if err != nil {
+		return err
+	}
+
+	err = subscribeLabels.MarshalCBOR(buf)
+	if err != nil {
+		return err
+	}
+
+	return c.WriteMessage(websocket.BinaryMessage, buf.Bytes())
 }
 
 type plcDirectoryRecord struct {
@@ -456,7 +514,11 @@ func lookupDid(handle string) (string, error) {
 	return "", fmt.Errorf("could not lookup did for %s:\n%s\n", dnsErr, httpsErr)
 }
 
-func NewServer(addr string, indexer *indexer.Indexer, maxConn int64, pinnedPost string) *Server {
+func NewServer(ctx context.Context, indexer *indexer.Indexer) *Server {
+	addr, _ := ctx.Value("listen").(string)
+	maxConn, _ := ctx.Value("max-web-connections").(int64)
+	pinnedPost, _ := ctx.Value("pinned-post").(string)
+
 	at := func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%s %s\n", r.Method, r.URL.String())
 
@@ -533,7 +595,8 @@ func NewServer(addr string, indexer *indexer.Indexer, maxConn int64, pinnedPost 
 		Indexer:    indexer,
 		pinnedPost: pinnedPost,
 		sem:        semaphore.NewWeighted(maxConn),
-		ticker:     ticker.NewTicker(1 * time.Minute),
+		tickermu:   sync.Mutex{},
+		tickers:    make(map[*ticker.Ticker]bool),
 	}
 
 	mux := http.NewServeMux()
@@ -615,6 +678,136 @@ func NewServer(addr string, indexer *indexer.Indexer, maxConn int64, pinnedPost 
 		w.WriteHeader(200)
 		w.Write([]byte(did))
 	})
+	mux.HandleFunc("/quotes/", func(w http.ResponseWriter, r *http.Request) {
+		url := r.URL.String()
+		log.Printf("%s %s\n", r.Method, url)
+
+		tmpl, err := template.New("quotes.html").Parse(QuotesHtmlTemplateText)
+		if err != nil {
+			log.Printf("error processing quotes html template: %s\n", err)
+			ISE(w)
+			return
+		}
+
+		if url == "/quotes/" {
+			w.Header().Add("cache-control", "public, max-age=600")
+			w.Header().Add("content-type", "text/html; charset=utf-8")
+			w.WriteHeader(200)
+
+			tmplParams := &QuotesHtmlParams{Form: true}
+			err := tmpl.Execute(w, tmplParams)
+			if err != nil {
+				log.Printf("error processing quotes html template: %s\n", err)
+				ISE(w)
+			}
+
+			return
+		}
+
+		tmplParams := &QuotesHtmlParams{Url: fmt.Sprintf("https://%s", url[15:])}
+
+		if len(url) < 32 {
+			log.Printf("invalid length: %d\n", len(url))
+			w.Header().Add("cache-control", "public, max-age=30")
+			w.Header().Add("content-type", "text/html; charset=utf-8")
+			w.WriteHeader(400)
+
+			tmplParams.Error = fmt.Sprintf("%s does not look like a valid bsky.app post url\n", url[9:])
+			err := tmpl.Execute(w, tmplParams)
+			if err != nil {
+				log.Printf("error processing quotes html template: %s\n", err)
+				ISE(w)
+			}
+
+			return
+		}
+		if url[:32] != "/quotes/https:/bsky.app/profile/" {
+			log.Printf("invalid prefix: %s\n", url[:3])
+			w.Header().Add("cache-control", "public, max-age=30")
+			w.Header().Add("content-type", "text/html; charset=utf-8")
+			w.WriteHeader(400)
+
+			tmplParams.Error = fmt.Sprintf("%s does not look like a valid bsky.app post url\n", url[9:])
+			err := tmpl.Execute(w, tmplParams)
+			if err != nil {
+				log.Printf("error processing quotes html template: %s\n", err)
+				ISE(w)
+			}
+
+			return
+		}
+
+		parts := strings.Split(url[32:], "/")
+		if len(parts) != 3 {
+			log.Printf("invalid suffix: %s\n", url[32:])
+			w.Header().Add("cache-control", "public, max-age=30")
+			w.Header().Add("content-type", "text/html; charset=utf-8")
+			w.WriteHeader(400)
+
+			tmplParams.Error = fmt.Sprintf("%s does not look like a valid bsky.app post url\n", url[9:])
+			err := tmpl.Execute(w, tmplParams)
+			if err != nil {
+				log.Printf("error processing quotes html template: %s\n", err)
+				ISE(w)
+			}
+
+			return
+		}
+
+		did, err := lookupDid(parts[0])
+		if err != nil {
+			log.Printf("%+v\n", err)
+			w.Header().Add("cache-control", "public, max-age=30")
+			w.Header().Add("content-type", "text/html; charset=utf-8")
+			w.WriteHeader(400)
+
+			tmplParams.Error = fmt.Sprintf("%s does not look like a valid bsky.app post url\n", url[9:])
+			err := tmpl.Execute(w, tmplParams)
+			if err != nil {
+				log.Printf("error processing quotes html template: %s\n", err)
+				ISE(w)
+			}
+
+			return
+		}
+
+		aturi := fmt.Sprintf("at://%s/app.bsky.feed.post/%s", did, parts[2])
+		quotes, err := s.Indexer.Db.SelectQuotesForUri(aturi)
+		if err != nil {
+			log.Printf("%+v\n", err)
+			w.Header().Add("cache-control", "public, max-age=30")
+			w.Header().Add("content-type", "text/html; charset=utf-8")
+			w.WriteHeader(400)
+
+			tmplParams.Error = err.Error()
+			err := tmpl.Execute(w, tmplParams)
+			if err != nil {
+				log.Printf("error processing quotes html template: %s\n", err)
+				ISE(w)
+			}
+
+			return
+		}
+
+		quoteUris := make([]string, 0, len(quotes))
+		for _, quote := range quotes {
+			did := utils.ParseDid(quote.Uri)
+			rkey := utils.ParseRkey(quote.Uri)
+			uri := fmt.Sprintf("https://bsky.app/profile/%s/post/%s", did, rkey)
+			quoteUris = append(quoteUris, uri)
+		}
+
+		w.Header().Add("cache-control", "public, max-age=30")
+		w.Header().Add("content-type", "text/html; charset=utf-8")
+		w.WriteHeader(200)
+
+		tmplParams.Posts = quoteUris
+		err = tmpl.Execute(w, tmplParams)
+		if err != nil {
+			log.Printf("error processing quotes html template: %s\n", err)
+			ISE(w)
+		}
+	})
 	mux.HandleFunc("/xrpc/com.atproto.label.subscribeLabels", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%s %s\n", r.Method, r.URL.String())
 
@@ -631,6 +824,9 @@ func NewServer(addr string, indexer *indexer.Indexer, maxConn int64, pinnedPost 
 			}
 		}
 
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+
 		c, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Print("upgrade:", err)
@@ -638,25 +834,68 @@ func NewServer(addr string, indexer *indexer.Indexer, maxConn int64, pinnedPost 
 		}
 		defer c.Close()
 
+		c.SetPingHandler(func(message string) error {
+			err := c.WriteControl(websocket.PongMessage, []byte(message), time.Now().Add(time.Second*60))
+			if err == websocket.ErrCloseSent {
+				return nil
+			} else if e, ok := err.(net.Error); ok && e.Temporary() {
+				return nil
+			}
+			return err
+		})
+
+		c.SetPongHandler(func(message string) error {
+			if err := c.SetReadDeadline(time.Now().Add(time.Minute)); err != nil {
+				log.Printf("failed to set read deadline: %s", err)
+			}
+
+			return nil
+		})
+
+		go func() {
+			for {
+				_, _, err := c.ReadMessage()
+				if err != nil {
+					fmt.Printf("failed to read message from client: %s\n", err)
+					cancel()
+					return
+				}
+			}
+		}()
+
 		limit := 25
 		db := s.Indexer.Db
 
-	BACKFILL:
-		for s.ticker != nil {
-			labels, err := db.SelectPostLabels(cursor, 25)
+		if cursor == 0 {
+			cursor, err = db.SelectLastCustomLabelId()
 			if err != nil {
-				fmt.Printf("SelectPostLabels err: %+v", err)
+				fmt.Printf("SelectLastCustomLabelId err: %+v\n", err)
+				return
+			}
+			if cursor != 0 {
+				cursor = cursor - 1
+			}
+		}
+
+		ticker := s.addTicker(30 * time.Second)
+		defer s.removeTicker(ticker)
+
+	BACKFILL:
+		for len(s.tickers) != 0 {
+			labels, err := db.SelectCustomLabels(cursor, limit)
+			if err != nil {
+				fmt.Printf("SelectCustomAccountLabels err: %+v\n", err)
 				return
 			}
 			if len(labels) == 0 {
 				break BACKFILL
 			}
 
-			cursor = labels[len(labels)-1].PostLabelId
+			cursor = labels[len(labels)-1].CustomLabelId
 
-			err = writeSubscribeLabels(c, labels)
+			err = s.writeSubscribeLabels(c, labels)
 			if err != nil {
-				fmt.Printf("writeSubscribeLabels err: %+v", err)
+				fmt.Printf("writeSubscribeLabels err: %+v\n", err)
 				return
 			}
 
@@ -664,34 +903,43 @@ func NewServer(addr string, indexer *indexer.Indexer, maxConn int64, pinnedPost 
 				break BACKFILL
 			}
 		}
-		ticker := s.ticker
-		if ticker == nil {
+		if len(s.tickers) == 0 {
 			return
 		}
 
-		for range ticker.C {
-		TICK:
-			for {
-				labels, err := db.SelectPostLabels(cursor, 25)
-				if err != nil {
-					fmt.Printf("SelectPostLabels err: %+v", err)
-					return
-				}
-				if len(labels) == 0 {
-					break TICK
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for {
+					if err := c.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
+						fmt.Printf("failed to ping client: %s\n", err)
+						return
+					}
+
+					labels, err := db.SelectCustomLabels(cursor, 25)
+					if err != nil {
+						fmt.Printf("SelectCustomLabels err: %+v\n", err)
+						return
+					}
+					if len(labels) == 0 {
+						break
+					}
+
+					cursor = labels[len(labels)-1].CustomLabelId
+
+					err = s.writeSubscribeLabels(c, labels)
+					if err != nil {
+						fmt.Printf("writeSubscribeLabels err: %+v\n", err)
+						return
+					}
+
+					if len(labels) < limit {
+						break
+					}
 				}
 
-				cursor = labels[len(labels)-1].PostLabelId
-
-				err = writeSubscribeLabels(c, labels)
-				if err != nil {
-					fmt.Printf("writeSubscribeLabels err: %+v\n", err)
-					return
-				}
-
-				if len(labels) < limit {
-					break TICK
-				}
 			}
 		}
 	})
@@ -707,6 +955,9 @@ func NewServer(addr string, indexer *indexer.Indexer, maxConn int64, pinnedPost 
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/dms"},
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/firehose"},
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/first20"},
+			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/bangers"},
+			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/birthdays"},
+			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/f-birthdays"},
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/gmgn"},
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/f-gmgn"},
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/lewds"},
@@ -810,7 +1061,7 @@ var ServerCmd = &cli.Command{
 			return err
 		}
 
-		server := NewServer(cctx.String("listen"), indexer, cctx.Int64("max-web-connections"), cctx.String("pinned-post"))
+		server := NewServer(cmd.ToContext(cctx), indexer)
 		go server.Serve()
 		defer server.Shutdown(context.Background())
 
@@ -818,3 +1069,167 @@ var ServerCmd = &cli.Command{
 		return ctx.Err()
 	},
 }
+
+type QuotesHtmlParams struct {
+	Error string
+	Form  bool
+	Posts []string
+	Url   string
+}
+
+var QuotesHtmlTemplateText = `
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Bluesky quotes</title>
+		<style>
+			:root {
+				--background-primary: #fafafa;
+				--background-secondary: #e5e5e5;
+				--text-primary: #000000;
+				--text-link: #1d4ed8;
+				--divider: #c8c8c8;
+			}
+
+			@media (prefers-color-scheme: dark) {
+				:root {
+					--background-primary: #0a0a0a;
+					--background-secondary: #171717;
+					--text-primary: #ffffff;
+					--text-link: #60a5fa;
+					--divider: #404040;
+				}
+			}
+
+			html {
+				background: var(--background-primary);
+				color: var(--text-primary);
+				color-scheme: light dark;
+				font-size: 14px;
+				line-height: 1.25rem;
+				font-family:
+					system-ui,
+					-apple-system,
+					BlinkMacSystemFont,
+					'Segoe UI',
+					Roboto,
+					Oxygen,
+					Ubuntu,
+					Cantarell,
+					'Open Sans',
+					'Helvetica Neue',
+					sans-serif;
+			}
+
+			body {
+				margin: 24px auto;
+				padding: 0 16px;
+				max-width: 680px;
+			}
+
+			h1,
+			h2,
+			h3,
+			h4,
+			h5,
+			h6,
+			p {
+				margin-block-start: 1.1rem;
+				margin-block-end: 1.1rem;
+			}
+
+			h1 {
+				font-size: 1.25rem;
+			}
+			h2 {
+				font-size: 1.125rem;
+			}
+
+			a {
+				color: var(--text-link);
+			}
+
+			pre {
+				border-radius: 4px;
+				background: var(--background-secondary);
+				padding: 8px;
+				overflow-x: auto;
+				font-size: 12px;
+			}
+
+			bluesky-post {
+				--font-size: 16px;
+				margin: 16px auto;
+			}
+
+			.bluesky-post-fallback {
+				margin: 16px 0;
+				border-left: 3px solid var(--divider);
+				padding: 4px 8px;
+			}
+			.bluesky-post-fallback p {
+				margin: 0 0 8px 0;
+			}
+		</style>
+		<script type="module" src="https://esm.sh/bluesky-post-embed@~0.1.0"></script>
+		<script type="module">
+			const dark = matchMedia('(prefers-color-scheme: dark)');
+
+			const update_theme = () => {
+				const is_dark = dark.matches;
+
+				for (const node of document.querySelectorAll('bluesky-post')) {
+					node.setAttribute('theme', !is_dark ? 'light' : 'dark');
+				}
+			};
+
+			update_theme();
+			dark.addEventListener('change', update_theme);
+		</script>
+	</head>
+	<body>
+		{{ if .Form }}
+		<form method="post" id="quotes">
+			<label for="url">Bluesky Post URL:</label>
+			<input type="text" id="url" name="url">
+			<button type="submit">Lookup Quotes!</button>
+		</form>
+		<script>
+			const formElement = document.forms['quotes'];
+
+			function lookupQuotes (e) {
+				e.preventDefault();
+
+				const data = new FormData(e.target);
+				const url = data.get("url");
+
+				formElement.action = document.location.href + url
+				formElement.removeEventListener('submit', lookupQuotes);
+				formElement.submit();
+			}
+
+			formElement.addEventListener('submit', lookupQuotes);
+		</script>
+		{{ else }}
+		{{ if .Url }}
+		<h1>Quote Posts for {{.Url}}</h1>
+		{{ end }}
+		{{ if .Error }}
+		<div>
+			Error looking up quotes:
+			<pre>{{ .Error }}</pre>
+		</div>
+		{{ end }}
+		{{ if .Posts }}
+		{{ range .Posts }}
+		<bluesky-post src="{{ . }}"></bluesky-post>
+		{{ end }}
+		{{ else if not .Error }}
+		<div>No quotes found yet</div>
+		{{ end }}
+		{{ end }}
+	</body>
+</html>
+`

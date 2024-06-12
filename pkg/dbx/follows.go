@@ -23,7 +23,7 @@ type FollowRow struct {
 
 type DBxTableFollows struct {
 	*sqlx.DB `dbx-table:"follows" dbx-pk:"follow_id"`
-	Path     string
+	path     string
 	cache    *lru.Cache[int64, *followCacheEntry]
 }
 

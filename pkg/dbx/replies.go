@@ -3,6 +3,7 @@ package dbx
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -37,6 +38,8 @@ CREATE INDEX IF NOT EXISTS idx_replies_parent_actor_id
 ON replies(parent_actor_id, post_id DESC);
 CREATE INDEX IF NOT EXISTS idx_replies_parent_actor_actor_id
 ON replies(parent_actor_id, actor_id, post_id DESC);
+CREATE INDEX idx_replies_actor_id
+ON replies(actor_id, post_id DESC);
 `
 
 func NewReplyTable(dir string) *DBxTableReplies {
@@ -62,7 +65,57 @@ func (d *DBxTableReplies) FindByPostId(postid int64) (*ReplyRow, error) {
 	return reply, nil
 }
 
-func (d *DBxTableReplies) SelectRepliesByActorId(actorid int64, before int64, limit int) ([]int64, error) {
+func (d *DBxTableReplies) SelectRepliesFromActorId(actorid int64, before int64, limit int) ([]int64, error) {
+	q := `
+SELECT
+	post_id
+FROM
+	replies
+WHERE
+	actor_id = $1
+	AND post_id < $2
+ORDER BY
+	post_id DESC
+LIMIT
+	$3
+`
+
+	mentions := make([]int64, 0, limit)
+	err := d.Select(&mentions, q, actorid, before, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	return mentions, nil
+}
+
+func (d *DBxTableReplies) SelectRepliesFromActorIds(actorids []int64, before int64, limit int) ([]int64, error) {
+	replies := make([]int64, 0, len(actorids))
+
+	if len(actorids) == 0 {
+		return replies, nil
+	}
+
+	params := make([]any, 0, len(actorids)+2)
+	params = append(params, before)
+
+	plcs := make([]string, len(actorids))
+	for i, actorid := range actorids {
+		params = append(params, actorid)
+		plcs[i] = "?"
+	}
+	params = append(params, limit)
+
+	q := fmt.Sprintf("SELECT post_id FROM replies WHERE post_id < ? AND actor_id IN (%s) ORDER BY post_id DESC LIMIT ?", strings.Join(plcs, ", "))
+	err := d.Select(&replies, q, params...)
+	if err != nil {
+		return nil, err
+	}
+
+	return replies, nil
+}
+
+func (d *DBxTableReplies) SelectRepliesToActorId(actorid int64, before int64, limit int) ([]int64, error) {
 	q := `
 SELECT
 	post_id

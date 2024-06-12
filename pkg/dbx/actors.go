@@ -14,6 +14,7 @@ import (
 
 type ActorRow struct {
 	ActorId   int64  `db:"actor_id"`
+	Birthday  int64  `db:"birthday"`
 	Blocked   bool   `db:"blocked"`
 	Did       string `db:"did"`
 	Created   bool
@@ -31,12 +32,15 @@ type DBxTableActors struct {
 var ActorSchema = `
 CREATE TABLE IF NOT EXISTS actors (
 	actor_id INTEGER PRIMARY KEY,
+	birthday INTEGER DEFAULT 0,
 	did TEXT NOT NULL UNIQUE,
 	blocked INTEGER DEFAULT 0,
 	created_at INTEGER DEFAULT 0,
 	last_post INTEGER DEFAULT 0,
 	posts INTEGER DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_actors_blocked_birthday
+ON actors(blocked, birthday);
 CREATE INDEX IF NOT EXISTS idx_actors_created_at
 ON actors(created_at);
 CREATE INDEX IF NOT EXISTS idx_actors_blocked_created_at
@@ -73,6 +77,28 @@ func (d *DBxTableActors) FindActorById(actorid int64) (*ActorRow, error) {
 	}
 
 	return actorRow, nil
+}
+
+func (d *DBxTableActors) FindActorsById(actorids []int64) ([]*ActorRow, error) {
+	rows := make([]*ActorRow, 0, len(actorids))
+
+	params := make([]any, len(actorids))
+	plcs := make([]string, len(actorids))
+	for i, actorid := range actorids {
+		params[i] = actorid
+		plcs[i] = "?"
+	}
+
+	err := d.DB.Select(
+		&rows,
+		fmt.Sprintf("SELECT * FROM actors WHERE actor_id IN (%s)", strings.Join(plcs, ",")),
+		params...,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return rows, nil
 }
 
 func (d *DBxTableActors) findActor(did string) (*ActorRow, error) {
@@ -221,6 +247,41 @@ func (d *DBxTableActors) FindOrCreateActor(did string) (*ActorRow, error) {
 	}
 
 	return d.createActor(did)
+}
+
+func (d *DBxTableActors) SelectActorsWithirthdaysBetween(start int64, end int64) ([]*ActorRow, error) {
+	actors := make([]*ActorRow, 0)
+	err := d.Select(&actors, "SELECT * FROM actors WHERE birthday > $1 AND birthday < $2 AND blocked == 0 ORDER BY created_at ASC", start, end)
+	if err != nil {
+		return nil, err
+	}
+
+	return actors, nil
+}
+
+func (d *DBxTableActors) InitializeBirthday(did string, birthday int64) (*ActorRow, error) {
+	actor, err := d.findActor(did)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = d.DB.Exec("UPDATE actors SET birthday = ? WHERE actor_id = ?", birthday, actor.ActorId)
+	if err != nil {
+		return nil, err
+	}
+	actor.Birthday = birthday
+
+	return actor, nil
+}
+
+func (d *DBxTableActors) SelectActorsWithoutBirthdays(cutoff int64, limit int) ([]*ActorRow, error) {
+	actors := make([]*ActorRow, 0, limit)
+	err := d.Select(&actors, "SELECT * FROM actors WHERE birthday == 0 AND blocked == 0 AND actor_id > $1 ORDER BY actor_id ASC LIMIT $2", cutoff, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	return actors, nil
 }
 
 func (d *DBxTableActors) SelectUninitializedActors(cutoff int64, limit int) ([]*ActorRow, error) {
