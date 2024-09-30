@@ -971,6 +971,7 @@ func NewServer(ctx context.Context, indexer *indexer.Indexer) *Server {
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/rembangs"},
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/renewskies"},
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/f-renewskies"},
+			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/rude"},
 		}
 
 		b, err := json.Marshal(response)
