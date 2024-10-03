@@ -80,6 +80,10 @@ func init() {
 				if err != nil {
 					return err
 				}
+				if SlowQueryThresholdMs < 0 {
+					return nil
+				}
+
 				return conn.SetTrace(&sqlite3.TraceConfig{
 					Callback:        traceCallback,
 					EventMask:       eventMask,

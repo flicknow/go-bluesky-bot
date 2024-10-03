@@ -24,9 +24,11 @@ type ActorRow struct {
 }
 
 type DBxTableActors struct {
-	*sqlx.DB `dbx-table:"actors" dbx-pk:"actor_id"`
-	path     string
-	cache    *lru.Cache[string, *ActorRow]
+	*sqlx.DB        `dbx-table:"actors" dbx-pk:"actor_id"`
+	path            string
+	cache           *lru.Cache[string, *ActorRow]
+	NamedStatements map[string]*sqlx.NamedStmt
+	Statements      map[string]*sqlx.Stmt
 }
 
 var ActorSchema = `
@@ -59,7 +61,40 @@ func NewActorTable(dir string, cacheSize int) *DBxTableActors {
 		SQLxMustOpen(path, ActorSchema),
 		path,
 		cache,
+		make(map[string]*sqlx.NamedStmt),
+		make(map[string]*sqlx.Stmt),
 	}
+}
+
+func (d *DBxTableActors) findOrPrepareNamedStmt(q string) (*sqlx.NamedStmt, error) {
+	stmt := d.NamedStatements[q]
+	if stmt != nil {
+		return stmt, nil
+	}
+
+	var err error
+	stmt, err = d.PrepareNamed(q)
+	if err != nil {
+		return nil, err
+	}
+
+	d.NamedStatements[q] = stmt
+	return stmt, err
+}
+func (d *DBxTableActors) findOrPrepareStmt(q string) (*sqlx.Stmt, error) {
+	stmt := d.Statements[q]
+	if stmt != nil {
+		return stmt, nil
+	}
+
+	var err error
+	stmt, err = d.Preparex(q)
+	if err != nil {
+		return nil, err
+	}
+
+	d.Statements[q] = stmt
+	return stmt, err
 }
 
 func (d *DBxTableActors) FindActorById(actorid int64) (*ActorRow, error) {
@@ -102,13 +137,18 @@ func (d *DBxTableActors) FindActorsById(actorids []int64) ([]*ActorRow, error) {
 }
 
 func (d *DBxTableActors) findActor(did string) (*ActorRow, error) {
-	row := d.QueryRowx("SELECT * FROM actors WHERE did = ?", did)
+	stmt, err := d.findOrPrepareStmt("SELECT * FROM actors WHERE did = ?")
+	if err != nil {
+		return nil, err
+	}
+
+	row := stmt.QueryRowx(did)
 	if row == nil {
 		return nil, fmt.Errorf("could not find actor with did %s", did)
 	}
 
 	actorRow := &ActorRow{Did: did}
-	err := row.StructScan(actorRow)
+	err = row.StructScan(actorRow)
 	if (err != nil) && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	} else if err != nil {
@@ -159,7 +199,12 @@ func (d *DBxTableActors) FindActors(dids []string) ([]*ActorRow, error) {
 	}
 
 	q := fmt.Sprintf("SELECT * FROM actors WHERE did IN (%s)", strings.Join(plcs, ","))
-	err := d.Select(&found, q, params...)
+	stmt, err := d.findOrPrepareStmt(q)
+	if err != nil {
+		return nil, err
+	}
+
+	err = stmt.Select(&found, params...)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +256,12 @@ func (d *DBxTableActors) FindOrCreateActors(dids []string) ([]*ActorRow, error) 
 }
 
 func (d *DBxTableActors) createActor(did string) (*ActorRow, error) {
-	res, err := d.Exec("INSERT OR IGNORE INTO actors (did) VALUES (?)", did)
+	stmt, err := d.findOrPrepareStmt("INSERT OR IGNORE INTO actors (did) VALUES (?)")
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := stmt.Exec(did)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +345,12 @@ func (d *DBxTableActors) SelectUninitializedActors(cutoff int64, limit int) ([]*
 }
 
 func (d *DBxTableActors) IncrementPostsCount(actorRow *ActorRow, now int64) error {
-	res, err := d.Exec("UPDATE actors SET last_post = ?, posts = posts + 1 WHERE actor_id = ?", now, actorRow.ActorId)
+	stmt, err := d.findOrPrepareStmt("UPDATE actors SET last_post = ?, posts = posts + 1 WHERE actor_id = ?")
+	if err != nil {
+		return err
+	}
+
+	res, err := stmt.Exec(now, actorRow.ActorId)
 	if err != nil {
 		return err
 	}
@@ -317,7 +372,12 @@ func (d *DBxTableActors) IncrementPostsCount(actorRow *ActorRow, now int64) erro
 }
 
 func (d *DBxTableActors) DecrementPostsCount(actorid int64, did string) error {
-	res, err := d.Exec("UPDATE actors SET posts = posts - 1 WHERE actor_id = ?", actorid)
+	stmt, err := d.findOrPrepareStmt("UPDATE actors SET posts = posts - 1 WHERE actor_id = ?")
+	if err != nil {
+		return err
+	}
+
+	res, err := stmt.Exec(actorid)
 	if err != nil {
 		return err
 	}

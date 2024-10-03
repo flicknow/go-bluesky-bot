@@ -42,6 +42,7 @@ var Collector *metrics.Collector = metrics.NewCollector(len(os.Getenv("GO_BLUESK
 var SlowQueryThresholdMs int64 = 1000
 var SQLiteDriver = "sqlite3_default"
 var SQLiteMMapSize = 0
+var SQLiteWalAutocheckpoint = 0
 var SQLiteSynchronous = "NORMAL"
 
 var BangerRegex = regexp.MustCompile(`^\W*banger\b`)
@@ -75,11 +76,6 @@ func (d *DBx) Block(did string) error {
 
 	actor.Blocked = true
 	err = d.InitActorInfo(actor, []*PostLabelRow{})
-	if err != nil {
-		return err
-	}
-
-	_, err = d.Posts.Exec("UPDATE posts SET labeled = 1 WHERE labeled = 0 AND actor_id = ?", actor.ActorId)
 	if err != nil {
 		return err
 	}
@@ -374,13 +370,15 @@ func (d *DBx) InsertRepost(repostRef *firehose.RepostRef) error {
 }
 
 func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels ...string) (*PostRow, error) {
-	clock := d.clock
-	startMethod := clock.NowUnixMilli()
-	metric := metrics.NewInsertPost()
-	defer func() {
-		metric.Val = clock.NowUnixMilli() - startMethod
-		Collector.InsertPost(metric)
-	}()
+	/*
+		clock := d.clock
+		startMethod := clock.NowUnixMilli()
+		metric := metrics.NewInsertPost()
+		defer func() {
+			metric.Val = clock.NowUnixMilli() - startMethod
+			Collector.InsertPost(metric)
+		}()
+	*/
 
 	post := postRef.Post
 	quote := postRef.Quotes
@@ -401,7 +399,7 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 	deferredPostid := NewDeferredInt64()
 	deferredParent := NewDeferredPost()
 	deferredQuoted := NewDeferredPost()
-	deferredRoot := NewDeferredPost()
+	//deferredRoot := NewDeferredPost()
 	deferredParentActor := NewDeferredInt64()
 	deferredQuotedActor := NewDeferredInt64()
 	deferredMentionedActors := NewDeferredInt64s()
@@ -410,7 +408,7 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 	errs := ParallelizeFuncsWithRetries(
 		func() error {
 			defer deferredPostid.Cancel()
-			defer func() { metric.Insert = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.Insert = clock.NowUnixMilli() - startMethod }()
 
 			postRow = &PostRow{
 				Uri:           uri,
@@ -437,23 +435,25 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 		},
 		func() error {
 			defer func() {
-				metric.FindPosts = clock.NowUnixMilli() - startMethod
+				//metric.FindPosts = clock.NowUnixMilli() - startMethod
 				deferredParent.Cancel()
 				deferredQuoted.Cancel()
-				deferredRoot.Cancel()
+				//deferredRoot.Cancel()
 			}()
 
-			rootUri := ""
+			//rootUri := ""
 
 			uris := make([]string, 0, 3)
 			if post.Reply != nil {
 				if post.Reply.Parent != nil {
 					uris = append(uris, parentUri)
 				}
-				if post.Reply.Root != nil {
-					rootUri = post.Reply.Root.Uri
-					uris = append(uris, rootUri)
-				}
+				/*
+					if post.Reply.Root != nil {
+						rootUri = post.Reply.Root.Uri
+						uris = append(uris, rootUri)
+					}
+				*/
 			}
 
 			if quote != "" {
@@ -473,9 +473,11 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 				if parentUri == uri {
 					deferredParent.Done(post)
 				}
-				if rootUri == uri {
-					deferredRoot.Done(post)
-				}
+				/*
+					if rootUri == uri {
+						deferredRoot.Done(post)
+					}
+				*/
 				if quote == uri {
 					deferredQuoted.Done(post)
 				}
@@ -488,7 +490,7 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 				return nil
 			}
 
-			defer func() { metric.InsertReply.Val = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.InsertReply.Val = clock.NowUnixMilli() - startMethod }()
 
 			if parentUri == "" {
 				return nil
@@ -507,28 +509,30 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 				}
 			}
 
-			rootRow := deferredRoot.Get()
-			if rootRow == nil {
-				rootRow = &PostRow{}
-			}
+			/*
+				rootRow := deferredRoot.Get()
+				if rootRow == nil {
+					rootRow = &PostRow{}
+				}
+			*/
 
 			postid := deferredPostid.Get()
 			if postid == 0 {
 				return nil
 			}
 
-			startInsert := clock.NowUnixMilli()
+			//startInsert := clock.NowUnixMilli()
 			replyRow := &ReplyRow{
 				PostId:        postid,
 				ActorId:       actorRow.ActorId,
 				ParentId:      parentRow.PostId,
 				ParentActorId: parentRow.ActorId,
-				RootId:        rootRow.PostId,
-				RootActorId:   rootRow.ActorId,
+				//RootId:        rootRow.PostId,
+				//RootActorId:   rootRow.ActorId,
 			}
 
 			e := d.Replies.InsertReply(replyRow)
-			metric.InsertReply.Insert = clock.NowUnixMilli() - startInsert
+			//metric.InsertReply.Insert = clock.NowUnixMilli() - startInsert
 			if e != nil {
 				return e
 			}
@@ -537,7 +541,7 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 		},
 		func() error {
 			defer func() {
-				metric.FindMentionedAndQuotedActors = clock.NowUnixMilli() - startMethod
+				//metric.FindMentionedAndQuotedActors = clock.NowUnixMilli() - startMethod
 				deferredParentActor.Cancel()
 				deferredQuotedActor.Cancel()
 				deferredMentionedActors.Cancel()
@@ -596,7 +600,7 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 				return nil
 			}
 
-			defer func() { metric.InsertQuote.Val = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.InsertQuote.Val = clock.NowUnixMilli() - startMethod }()
 
 			if quote == "" {
 				return nil
@@ -620,7 +624,7 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 				return nil
 			}
 
-			startInsert := clock.NowUnixMilli()
+			//startInsert := clock.NowUnixMilli()
 			quoterow := &QuoteRow{
 				PostId:         postid,
 				ActorId:        actorRow.ActorId,
@@ -628,7 +632,7 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 				SubjectActorId: quotedpost.ActorId,
 			}
 			e := d.Quotes.InsertQuote(quoterow)
-			metric.InsertQuote.Insert = clock.NowUnixMilli() - startInsert
+			//metric.InsertQuote.Insert = clock.NowUnixMilli() - startInsert
 			if e != nil {
 				return e
 			}
@@ -646,12 +650,12 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 				return nil
 			}
 
-			startInsert := clock.NowUnixMilli()
+			//startInsert := clock.NowUnixMilli()
 			e := d.Mentions.InsertMentions(postid, actorRow.ActorId, postMentions)
 			if e != nil {
 				return e
 			}
-			metric.InsertMentions.Insert = clock.NowUnixMilli() - startInsert
+			//metric.InsertMentions.Insert = clock.NowUnixMilli() - startInsert
 
 			return nil
 		},
@@ -659,7 +663,7 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 			if len(labels) == 0 {
 				return nil
 			}
-			defer func() { metric.InsertLabels.Val = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.InsertLabels.Val = clock.NowUnixMilli() - startMethod }()
 
 			labelids := make([]int64, 0, len(labels))
 			for _, name := range labels {
@@ -670,123 +674,125 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 
 				labelids = append(labelids, label.LabelId)
 			}
-			metric.InsertLabels.FindLabels = clock.NowUnixMilli() - startMethod
+			//metric.InsertLabels.FindLabels = clock.NowUnixMilli() - startMethod
 
 			postid := deferredPostid.Get()
 			if postid == 0 {
 				return nil
 			}
 
-			startInsert := clock.NowUnixMilli()
-			defer func() { metric.InsertLabels.Insert = clock.NowUnixMilli() - startInsert }()
+			//startInsert := clock.NowUnixMilli()
+			//defer func() { metric.InsertLabels.Insert = clock.NowUnixMilli() - startInsert }()
 
 			return d.PostLabels.InsertPostLabel(postid, labelids)
 		},
-		func() error {
-			if !postRef.IsDm() && ((post.Reply == nil) || (post.Reply.Parent == nil)) {
-				return nil
-			}
-			defer func() { metric.InsertDMs.Val = clock.NowUnixMilli() - startMethod }()
-
-			actorids := make([]int64, 0)
-			parent := deferredParent.Get()
-			if parent != nil {
-				startSelect := clock.NowUnixMilli()
-				dmMentions, err := d.Dms.SelectDms(parent.PostId)
-				metric.InsertDMs.FindDMs = clock.NowUnixMilli() - startSelect
-				if err != nil {
-					return err
+		/*
+			func() error {
+				if !postRef.IsDm() && ((post.Reply == nil) || (post.Reply.Parent == nil)) {
+					return nil
 				}
-				for _, actorid := range dmMentions {
-					actorids = append(actorids, actorid)
-				}
-			}
+				//defer func() { metric.InsertDMs.Val = clock.NowUnixMilli() - startMethod }()
 
-			if !postRef.IsDm() && (len(actorids) == 0) {
-				return nil
-			}
-
-			actorids = append(actorids, actorRow.ActorId)
-
-			for _, actorid := range deferredMentionedActors.Get() {
-				actorids = append(actorids, actorid)
-			}
-
-			postid := deferredPostid.Get()
-			if postid == 0 {
-				return nil
-			}
-
-			startInsert := clock.NowUnixMilli()
-			e := d.Dms.InsertDms(postid, uniqueInt64s(actorids))
-			if e != nil {
-				return e
-			}
-			metric.InsertDMs.Insert = clock.NowUnixMilli() - startInsert
-
-			return nil
-		},
-		func() error {
-			defer func() { metric.InsertThreadMentions.Val = clock.NowUnixMilli() - startMethod }()
-			actorids := make([]int64, 0)
-
-			if parentUri != "" {
+				actorids := make([]int64, 0)
 				parent := deferredParent.Get()
 				if parent != nil {
-					if parent.ActorId != actorRow.ActorId {
-						actorids = append(actorids, parent.ActorId)
-					}
-
-					startSelect := clock.NowUnixMilli()
-					parentmentions, err := d.ThreadMentions.SelectThreadMentions(parent.PostId)
-					metric.InsertThreadMentions.FindThreadMentions = clock.NowUnixMilli() - startSelect
+					//startSelect := clock.NowUnixMilli()
+					dmMentions, err := d.Dms.SelectDms(parent.PostId)
+					//metric.InsertDMs.FindDMs = clock.NowUnixMilli() - startSelect
 					if err != nil {
 						return err
 					}
-					for _, actorid := range parentmentions {
+					for _, actorid := range dmMentions {
+						actorids = append(actorids, actorid)
+					}
+				}
+
+				if !postRef.IsDm() && (len(actorids) == 0) {
+					return nil
+				}
+
+				actorids = append(actorids, actorRow.ActorId)
+
+				for _, actorid := range deferredMentionedActors.Get() {
+					actorids = append(actorids, actorid)
+				}
+
+				postid := deferredPostid.Get()
+				if postid == 0 {
+					return nil
+				}
+
+				//startInsert := clock.NowUnixMilli()
+				e := d.Dms.InsertDms(postid, uniqueInt64s(actorids))
+				if e != nil {
+					return e
+				}
+				//metric.InsertDMs.Insert = clock.NowUnixMilli() - startInsert
+
+				return nil
+			},
+				func() error {
+					//defer func() { metric.InsertThreadMentions.Val = clock.NowUnixMilli() - startMethod }()
+					actorids := make([]int64, 0)
+
+					if parentUri != "" {
+						parent := deferredParent.Get()
+						if parent != nil {
+							if parent.ActorId != actorRow.ActorId {
+								actorids = append(actorids, parent.ActorId)
+							}
+
+							//startSelect := clock.NowUnixMilli()
+							parentmentions, err := d.ThreadMentions.SelectThreadMentions(parent.PostId)
+							//metric.InsertThreadMentions.FindThreadMentions = clock.NowUnixMilli() - startSelect
+							if err != nil {
+								return err
+							}
+							for _, actorid := range parentmentions {
+								if actorid == actorRow.ActorId {
+									continue
+								}
+								actorids = append(actorids, actorid)
+							}
+						} else {
+							parentActor := deferredParentActor.Get()
+							if parentActor != 0 {
+								actorids = append(actorids, parentActor)
+							}
+						}
+					}
+
+					for _, actorid := range deferredMentionedActors.Get() {
 						if actorid == actorRow.ActorId {
 							continue
 						}
 						actorids = append(actorids, actorid)
 					}
-				} else {
-					parentActor := deferredParentActor.Get()
-					if parentActor != 0 {
-						actorids = append(actorids, parentActor)
+
+					quotedactorid := deferredQuotedActor.Get()
+					if (quotedactorid != 0) && (quotedactorid != actorRow.ActorId) {
+						actorids = append(actorids, quotedactorid)
 					}
-				}
-			}
 
-			for _, actorid := range deferredMentionedActors.Get() {
-				if actorid == actorRow.ActorId {
-					continue
-				}
-				actorids = append(actorids, actorid)
-			}
+					postid := deferredPostid.Get()
+					if postid == 0 {
+						return nil
+					}
 
-			quotedactorid := deferredQuotedActor.Get()
-			if (quotedactorid != 0) && (quotedactorid != actorRow.ActorId) {
-				actorids = append(actorids, quotedactorid)
-			}
-
-			postid := deferredPostid.Get()
-			if postid == 0 {
-				return nil
-			}
-
-			startInsert := clock.NowUnixMilli()
-			e := d.ThreadMentions.InsertThreadMention(postid, uniqueInt64s(actorids))
-			if e != nil {
-				return e
-			}
-			metric.InsertThreadMentions.Insert = clock.NowUnixMilli() - startInsert
-			return nil
-		},
+					//startInsert := clock.NowUnixMilli()
+					e := d.ThreadMentions.InsertThreadMention(postid, uniqueInt64s(actorids))
+					if e != nil {
+						return e
+					}
+					//metric.InsertThreadMentions.Insert = clock.NowUnixMilli() - startInsert
+					return nil
+				},
+		*/
 		func() error {
 			if !((actorRow.ActorId != 0) && ((post.Reply == nil) || (post.Reply.Parent == nil))) {
 				return nil
 			}
-			defer func() { metric.UpdateActor = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.UpdateActor = clock.NowUnixMilli() - startMethod }()
 
 			postid := deferredPostid.Get()
 			if postid == 0 {
@@ -859,41 +865,43 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 
 			return d.CustomLabels.InsertLabels([]*CustomLabel{row})
 		},
-		func() error {
-			if !d.extendedIndexing {
+		/*
+			func() error {
+				if !d.extendedIndexing {
+					return nil
+				}
+
+				quotedPost := deferredQuoted.Get()
+				if quotedPost == nil {
+					return nil
+				}
+
+				quotedPostId := quotedPost.PostId
+				_, err := d.Posts.Exec("UPDATE posts SET quotes = quotes + 1 WHERE post_id = ?", quotedPostId)
+				if err != nil {
+					log.Printf("ERROR updating quotes count for post %d: %+v\n", quotedPostId, err)
+				}
+
 				return nil
-			}
+			},
+			func() error {
+				if !d.extendedIndexing {
+					return nil
+				}
 
-			quotedPost := deferredQuoted.Get()
-			if quotedPost == nil {
+				parent := deferredParent.Get()
+				if (parent == nil) || (parent.PostId == 0) {
+					return nil
+				}
+
+				_, err := d.Posts.Exec("UPDATE posts SET replies = replies + 1 WHERE post_id = ?", parent.PostId)
+				if err != nil {
+					log.Printf("ERROR updating replies count for post %d: %+v\n", parent.PostId, err)
+				}
+
 				return nil
-			}
-
-			quotedPostId := quotedPost.PostId
-			_, err := d.Posts.Exec("UPDATE posts SET quotes = quotes + 1 WHERE post_id = ?", quotedPostId)
-			if err != nil {
-				log.Printf("ERROR updating quotes count for post %d: %+v\n", quotedPostId, err)
-			}
-
-			return nil
-		},
-		func() error {
-			if !d.extendedIndexing {
-				return nil
-			}
-
-			parent := deferredParent.Get()
-			if (parent == nil) || (parent.PostId == 0) {
-				return nil
-			}
-
-			_, err := d.Posts.Exec("UPDATE posts SET replies = replies + 1 WHERE post_id = ?", parent.PostId)
-			if err != nil {
-				log.Printf("ERROR updating replies count for post %d: %+v\n", parent.PostId, err)
-			}
-
-			return nil
-		},
+			},
+		*/
 	)
 	if len(errs) > 0 {
 		msg := fmt.Sprintf("Error indexing post %s:", uri)
@@ -935,9 +943,16 @@ func SQLxOpen(path string, initsql string) (*sqlx.DB, error) {
 		return nil, fmt.Errorf("error checking if sqlite db %s exists: %w", path, err)
 	}
 
-	pool, err := sqlx.Open(SQLiteDriver, fmt.Sprintf("file:%s?_busy_timeout=10000&_journal_mode=WAL&_synchronous=%s&_mmap_size=%d", path, SQLiteSynchronous, SQLiteMMapSize))
+	pool, err := sqlx.Open(SQLiteDriver, fmt.Sprintf("file:%s?_busy_timeout=10000&_journal_mode=WAL&_txlock=immediate&_synchronous=%s&_mmap_size=%d", path, SQLiteSynchronous, SQLiteMMapSize))
 	if err != nil {
 		return nil, fmt.Errorf("cannot open sqlite file %s: %w", path, err)
+	}
+
+	if SQLiteWalAutocheckpoint > 0 {
+		_, err = pool.Exec(fmt.Sprintf("PRAGMA wal_autocheckpoint=%d", SQLiteWalAutocheckpoint))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if !exists {
@@ -990,13 +1005,15 @@ func sortByPostIdDesc(posts []*PostRow) []*PostRow {
 }
 
 func (d *DBx) DeletePost(uri string) error {
-	clock := d.clock
-	startMethod := clock.NowUnixMilli()
-	metric := metrics.NewDeletePost()
-	defer func() {
-		metric.Val = clock.NowUnixMilli() - startMethod
-		Collector.DeletePost(metric)
-	}()
+	/*
+		clock := d.clock
+		startMethod := clock.NowUnixMilli()
+		metric := metrics.NewDeletePost()
+		defer func() {
+			metric.Val = clock.NowUnixMilli() - startMethod
+			Collector.DeletePost(metric)
+		}()
+	*/
 
 	postrow, err := d.Posts.FindByUri(uri)
 	if err != nil {
@@ -1009,38 +1026,40 @@ func (d *DBx) DeletePost(uri string) error {
 	deferredParentId := NewDeferredInt64()
 
 	errs := ParallelizeFuncsWithRetries(
-		func() error {
-			if !d.extendedIndexing {
-				return nil
-			}
+		/*
+			func() error {
+				if !d.extendedIndexing {
+					return nil
+				}
 
-			exists, err := queryHasResults(d.Likes, "SELECT 1 FROM likes WHERE subject_id = $1", postid)
-			if err != nil {
+				exists, err := queryHasResults(d.Likes, "SELECT 1 FROM likes WHERE subject_id = $1", postid)
+				if err != nil {
+					return err
+				} else if !exists {
+					return nil
+				}
+
+				_, err = d.Likes.Exec("DELETE FROM likes WHERE subject_id = $1", postid)
 				return err
-			} else if !exists {
-				return nil
-			}
+			},
+			func() error {
+				if !d.extendedIndexing {
+					return nil
+				}
 
-			_, err = d.Likes.Exec("DELETE FROM likes WHERE subject_id = $1", postid)
-			return err
-		},
-		func() error {
-			if !d.extendedIndexing {
-				return nil
-			}
+				exists, err := queryHasResults(d.Reposts, "SELECT 1 FROM reposts WHERE subject_id = $1", postid)
+				if err != nil {
+					return err
+				} else if !exists {
+					return nil
+				}
 
-			exists, err := queryHasResults(d.Reposts, "SELECT 1 FROM reposts WHERE subject_id = $1", postid)
-			if err != nil {
+				_, err = d.Reposts.Exec("DELETE FROM reposts WHERE subject_id = $1", postid)
 				return err
-			} else if !exists {
-				return nil
-			}
-
-			_, err = d.Reposts.Exec("DELETE FROM reposts WHERE subject_id = $1", postid)
-			return err
-		},
+			},
+		*/
 		func() error {
-			defer func() { metric.DeleteMentions.Val = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.DeleteMentions.Val = clock.NowUnixMilli() - startMethod }()
 
 			mentions, err := d.Mentions.SelectMentions(postid)
 			if err != nil {
@@ -1049,58 +1068,60 @@ func (d *DBx) DeletePost(uri string) error {
 			if len(mentions) == 0 {
 				return nil
 			}
-			metric.DeleteMentions.FindMentions = clock.NowUnixMilli() - startMethod
+			//metric.DeleteMentions.FindMentions = clock.NowUnixMilli() - startMethod
 
-			startDelete := clock.NowUnixMilli()
+			//startDelete := clock.NowUnixMilli()
 			err = d.Mentions.DeleteMentionByPostId(postid)
-			metric.DeleteMentions.Delete = clock.NowUnixMilli() - startDelete
+			//metric.DeleteMentions.Delete = clock.NowUnixMilli() - startDelete
 			if err != nil {
 				return err
 			}
 			return nil
 		},
-		func() error {
-			defer func() { metric.DeleteThreadMentions.Val = clock.NowUnixMilli() - startMethod }()
+		/*
+				func() error {
+					//defer func() { metric.DeleteThreadMentions.Val = clock.NowUnixMilli() - startMethod }()
 
-			mentions, err := d.ThreadMentions.SelectThreadMentions(postid)
-			if err != nil {
-				return err
-			}
-			if len(mentions) == 0 {
+					mentions, err := d.ThreadMentions.SelectThreadMentions(postid)
+					if err != nil {
+						return err
+					}
+					if len(mentions) == 0 {
+						return nil
+					}
+					//metric.DeleteThreadMentions.FindThreadMentions = clock.NowUnixMilli() - startMethod
+
+					//startDelete := clock.NowUnixMilli()
+					err = d.ThreadMentions.DeleteThreadMentionsByPostId(postid)
+					//metric.DeleteThreadMentions.Delete = clock.NowUnixMilli() - startDelete
+					if err != nil {
+						return err
+					}
+					return nil
+				},
+			func() error {
+				//defer func() { metric.DeleteDMs.Val = clock.NowUnixMilli() - startMethod }()
+
+				dms, err := d.Dms.SelectDms(postid)
+				if err != nil {
+					return err
+				}
+				if len(dms) == 0 {
+					return nil
+				}
+				//metric.DeleteDMs.FindDMs = clock.NowUnixMilli() - startMethod
+
+				//startDelete := clock.NowUnixMilli()
+				err = d.Dms.DeleteDmsByPostId(postid)
+				//metric.DeleteDMs.Delete = clock.NowUnixMilli() - startDelete
+				if err != nil {
+					return err
+				}
 				return nil
-			}
-			metric.DeleteThreadMentions.FindThreadMentions = clock.NowUnixMilli() - startMethod
-
-			startDelete := clock.NowUnixMilli()
-			err = d.ThreadMentions.DeleteThreadMentionsByPostId(postid)
-			metric.DeleteThreadMentions.Delete = clock.NowUnixMilli() - startDelete
-			if err != nil {
-				return err
-			}
-			return nil
-		},
+			},
+		*/
 		func() error {
-			defer func() { metric.DeleteDMs.Val = clock.NowUnixMilli() - startMethod }()
-
-			dms, err := d.Dms.SelectDms(postid)
-			if err != nil {
-				return err
-			}
-			if len(dms) == 0 {
-				return nil
-			}
-			metric.DeleteDMs.FindDMs = clock.NowUnixMilli() - startMethod
-
-			startDelete := clock.NowUnixMilli()
-			err = d.Dms.DeleteDmsByPostId(postid)
-			metric.DeleteDMs.Delete = clock.NowUnixMilli() - startDelete
-			if err != nil {
-				return err
-			}
-			return nil
-		},
-		func() error {
-			defer func() { metric.DeleteLabels.Val = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.DeleteLabels.Val = clock.NowUnixMilli() - startMethod }()
 
 			postlabels, err := d.PostLabels.SelectLabelsByPostId(postid)
 			if err != nil {
@@ -1109,11 +1130,11 @@ func (d *DBx) DeletePost(uri string) error {
 			if len(postlabels) == 0 {
 				return nil
 			}
-			metric.DeleteLabels.FindLabels = clock.NowUnixMilli() - startMethod
+			//metric.DeleteLabels.FindLabels = clock.NowUnixMilli() - startMethod
 
-			startDelete := clock.NowUnixMilli()
+			//startDelete := clock.NowUnixMilli()
 			err = d.PostLabels.DeletePostLabelsByPostId(postid)
-			metric.DeleteLabels.Delete = clock.NowUnixMilli() - startDelete
+			//metric.DeleteLabels.Delete = clock.NowUnixMilli() - startDelete
 			if err != nil {
 				return err
 			}
@@ -1121,7 +1142,7 @@ func (d *DBx) DeletePost(uri string) error {
 		},
 		func() error {
 			defer deferredParentId.Cancel()
-			defer func() { metric.DeleteReply.Val = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.DeleteReply.Val = clock.NowUnixMilli() - startMethod }()
 
 			reply, err := d.Replies.FindByPostId(postid)
 			if (err != nil) && !errors.Is(err, sql.ErrNoRows) {
@@ -1130,11 +1151,11 @@ func (d *DBx) DeletePost(uri string) error {
 				return nil
 			}
 			deferredParentId.Done(reply.ParentId)
-			metric.DeleteReply.FindReply = clock.NowUnixMilli() - startMethod
+			//metric.DeleteReply.FindReply = clock.NowUnixMilli() - startMethod
 
-			startDelete := clock.NowUnixMilli()
+			//startDelete := clock.NowUnixMilli()
 			err = d.Replies.DeleteReply(reply.ReplyId)
-			metric.DeleteReply.Delete = clock.NowUnixMilli() - startDelete
+			//metric.DeleteReply.Delete = clock.NowUnixMilli() - startDelete
 			if err != nil {
 				return err
 			}
@@ -1143,7 +1164,7 @@ func (d *DBx) DeletePost(uri string) error {
 		},
 		func() error {
 			defer deferredQuotedId.Cancel()
-			defer func() { metric.DeleteQuote.Val = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.DeleteQuote.Val = clock.NowUnixMilli() - startMethod }()
 
 			quote, err := d.Quotes.FindByPostId(postid)
 			if (err != nil) && !errors.Is(err, sql.ErrNoRows) {
@@ -1152,11 +1173,11 @@ func (d *DBx) DeletePost(uri string) error {
 				return nil
 			}
 			deferredQuotedId.Done(quote.SubjectId)
-			metric.DeleteQuote.FindQuote = clock.NowUnixMilli() - startMethod
+			//metric.DeleteQuote.FindQuote = clock.NowUnixMilli() - startMethod
 
-			startDelete := clock.NowUnixMilli()
+			//startDelete := clock.NowUnixMilli()
 			err = d.Quotes.DeleteQuote(quote.QuoteId)
-			metric.DeleteQuote.Delete = clock.NowUnixMilli() - startDelete
+			//metric.DeleteQuote.Delete = clock.NowUnixMilli() - startDelete
 			if err != nil {
 				return err
 			}
@@ -1174,7 +1195,7 @@ func (d *DBx) DeletePost(uri string) error {
 
 	errs = ParallelizeFuncsWithRetries(
 		func() error {
-			defer func() { metric.Delete = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.Delete = clock.NowUnixMilli() - startMethod }()
 			err := d.Posts.DeletePost(postid)
 			if err != nil {
 				return err
@@ -1185,7 +1206,7 @@ func (d *DBx) DeletePost(uri string) error {
 			if deferredParentId.Get() != 0 {
 				return nil
 			}
-			defer func() { metric.UpdateActor = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.UpdateActor = clock.NowUnixMilli() - startMethod }()
 
 			err := d.Actors.DecrementPostsCount(postrow.ActorId, utils.ParseDid(uri))
 			if err != nil {
@@ -1194,32 +1215,34 @@ func (d *DBx) DeletePost(uri string) error {
 
 			return nil
 		},
-		func() error {
-			if !d.extendedIndexing {
-				return nil
-			}
+		/*
+			func() error {
+				if !d.extendedIndexing {
+					return nil
+				}
 
-			quotedId := deferredQuotedId.Get()
-			if quotedId == 0 {
-				return nil
-			}
+				quotedId := deferredQuotedId.Get()
+				if quotedId == 0 {
+					return nil
+				}
 
-			_, err := d.Posts.Exec("UPDATE posts SET quotes = quotes - 1 WHERE post_id = $1", quotedId)
-			return err
-		},
-		func() error {
-			if !d.extendedIndexing {
-				return nil
-			}
+				_, err := d.Posts.Exec("UPDATE posts SET quotes = quotes - 1 WHERE post_id = $1", quotedId)
+				return err
+			},
+			func() error {
+				if !d.extendedIndexing {
+					return nil
+				}
 
-			parentId := deferredParentId.Get()
-			if parentId == 0 {
-				return nil
-			}
+				parentId := deferredParentId.Get()
+				if parentId == 0 {
+					return nil
+				}
 
-			_, err := d.Posts.Exec("UPDATE posts SET replies = replies - 1 WHERE post_id = $1", postid)
-			return err
-		},
+				_, err := d.Posts.Exec("UPDATE posts SET replies = replies - 1 WHERE post_id = $1", postid)
+				return err
+			},
+		*/
 	)
 	if len(errs) > 0 {
 		msg := fmt.Sprintf("Error deleting post %s:", uri)
@@ -1369,13 +1392,15 @@ func (d *DBx) DeleteRepost(uri string) error {
 }
 
 func (d *DBx) InsertFollow(followRef *firehose.FollowRef) error {
-	clock := d.clock
-	startMethod := clock.NowUnixMilli()
-	metric := metrics.NewInsertFollow()
-	defer func() {
-		metric.Val = clock.NowUnixMilli() - startMethod
-		Collector.InsertFollow(metric)
-	}()
+	/*
+		clock := d.clock
+		startMethod := clock.NowUnixMilli()
+		metric := metrics.NewInsertFollow()
+		defer func() {
+			metric.Val = clock.NowUnixMilli() - startMethod
+			Collector.InsertFollow(metric)
+		}()
+	*/
 
 	uri := followRef.Ref.Uri
 	deferredActorId := NewDeferredInt64()
@@ -1385,7 +1410,7 @@ func (d *DBx) InsertFollow(followRef *firehose.FollowRef) error {
 	errs := ParallelizeFuncsWithRetries(
 		func() error {
 			defer func() {
-				metric.FindActors = clock.NowUnixMilli() - startMethod
+				//metric.FindActors = clock.NowUnixMilli() - startMethod
 				deferredActorId.Cancel()
 				deferredSubjectId.Cancel()
 			}()
@@ -1424,7 +1449,7 @@ func (d *DBx) InsertFollow(followRef *firehose.FollowRef) error {
 				return nil
 			}
 
-			defer func() { metric.Insert = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.Insert = clock.NowUnixMilli() - startMethod }()
 
 			followrow := &FollowRow{
 				ActorId:   actorid,
@@ -1443,17 +1468,17 @@ func (d *DBx) InsertFollow(followRef *firehose.FollowRef) error {
 			return err
 		},
 		func() error {
-			defer func() { metric.Index.Val = clock.NowUnixMilli() - startMethod }()
+			//defer func() { metric.Index.Val = clock.NowUnixMilli() - startMethod }()
 
 			actorid := deferredActorId.Get()
 			if actorid == 0 {
 				return nil
 			}
 
-			startBranch := clock.NowUnixMilli()
+			//startBranch := clock.NowUnixMilli()
 
 			indexed, err := d.FollowsIndexed.FindByActorId(actorid)
-			metric.Index.FindIndex = clock.NowUnixMilli() - startBranch
+			//metric.Index.FindIndex = clock.NowUnixMilli() - startBranch
 			if err != nil {
 				return err
 			}
@@ -1466,9 +1491,9 @@ func (d *DBx) InsertFollow(followRef *firehose.FollowRef) error {
 				return nil
 			}
 
-			startSetLastFollow := clock.NowUnixMilli()
+			//startSetLastFollow := clock.NowUnixMilli()
 			err = d.FollowsIndexed.SetLastFollow(actorid, followid)
-			metric.Index.SetLastFollow = clock.NowUnixMilli() - startSetLastFollow
+			//metric.Index.SetLastFollow = clock.NowUnixMilli() - startSetLastFollow
 			if err != nil {
 				return err
 			}
@@ -1488,13 +1513,15 @@ func (d *DBx) InsertFollow(followRef *firehose.FollowRef) error {
 	return nil
 }
 func (d *DBx) DeleteFollow(uri string) error {
-	clock := d.clock
-	startMethod := clock.NowUnixMilli()
-	metric := metrics.NewDeleteFollow()
-	defer func() {
-		metric.Val = clock.NowUnixMilli() - startMethod
-		Collector.DeleteFollow(metric)
-	}()
+	/*
+		clock := d.clock
+		startMethod := clock.NowUnixMilli()
+		metric := metrics.NewDeleteFollow()
+		defer func() {
+			metric.Val = clock.NowUnixMilli() - startMethod
+			Collector.DeleteFollow(metric)
+		}()
+	*/
 
 	did := utils.ParseDid(uri)
 	if did == "" {
@@ -1588,20 +1615,22 @@ func (d *DBx) Prune(since int64, limit int) (int, error) {
 			}
 			return nil
 		},
-		func() error {
-			exists, err := queryHasResults(d.ThreadMentions, "SELECT 1 FROM thread_mentions WHERE post_id > 0 AND post_id <= $1", cutoff)
-			if err != nil {
-				return err
-			} else if !exists {
-				return nil
-			}
+		/*
+			func() error {
+				exists, err := queryHasResults(d.ThreadMentions, "SELECT 1 FROM thread_mentions WHERE post_id > 0 AND post_id <= $1", cutoff)
+				if err != nil {
+					return err
+				} else if !exists {
+					return nil
+				}
 
-			_, err = d.ThreadMentions.Exec("DELETE FROM thread_mentions WHERE post_id > 0 AND post_id <= $1", cutoff)
-			if err != nil {
-				return err
-			}
-			return nil
-		},
+				_, err = d.ThreadMentions.Exec("DELETE FROM thread_mentions WHERE post_id > 0 AND post_id <= $1", cutoff)
+				if err != nil {
+					return err
+				}
+				return nil
+			},
+		*/
 		func() error {
 			exists, err := queryHasResults(d.Quotes, "SELECT 1 FROM quotes WHERE post_id > 0 AND post_id <= $1", cutoff)
 			if err != nil {
@@ -1646,20 +1675,22 @@ func (d *DBx) Prune(since int64, limit int) (int, error) {
 			}
 			return nil
 		},
-		func() error {
-			exists, err := queryHasResults(d.Dms, "SELECT 1 FROM dms WHERE post_id > 0 AND post_id <= $1", cutoff)
-			if err != nil {
-				return err
-			} else if !exists {
-				return nil
-			}
+		/*
+			func() error {
+				exists, err := queryHasResults(d.Dms, "SELECT 1 FROM dms WHERE post_id > 0 AND post_id <= $1", cutoff)
+				if err != nil {
+					return err
+				} else if !exists {
+					return nil
+				}
 
-			_, err = d.Dms.Exec("DELETE FROM dms WHERE post_id > 0 AND post_id <= $1", cutoff)
-			if err != nil {
-				return err
-			}
-			return nil
-		},
+				_, err = d.Dms.Exec("DELETE FROM dms WHERE post_id > 0 AND post_id <= $1", cutoff)
+				if err != nil {
+					return err
+				}
+				return nil
+			},
+		*/
 	)
 	if len(errs) > 0 {
 		msg := fmt.Sprintf("Error pruning posts from cutoff %d:", cutoff)
@@ -3048,6 +3079,11 @@ func NewDBx(ctx context.Context) *DBx {
 	synchronous, ok := ctx.Value("db-synchronous-mode").(string)
 	if ok {
 		SQLiteSynchronous = synchronous
+	}
+
+	autocheckpoint, ok := ctx.Value("db-wal-autocheckpoint").(int)
+	if ok {
+		SQLiteWalAutocheckpoint = autocheckpoint
 	}
 
 	threshold, ok := ctx.Value("slow-query-threshold-ms").(int64)

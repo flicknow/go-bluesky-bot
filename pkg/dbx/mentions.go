@@ -16,8 +16,10 @@ type MentionRow struct {
 }
 
 type DBxTableMentions struct {
-	*sqlx.DB `dbx-table:"mentions" dbx-pk:"mention_id"`
-	path     string
+	*sqlx.DB        `dbx-table:"mentions" dbx-pk:"mention_id"`
+	path            string
+	NamedStatements map[string]*sqlx.NamedStmt
+	Statements      map[string]*sqlx.Stmt
 }
 
 var MentionSchema = `
@@ -39,7 +41,40 @@ func NewMentionTable(dir string) *DBxTableMentions {
 	return &DBxTableMentions{
 		SQLxMustOpen(path, MentionSchema),
 		path,
+		make(map[string]*sqlx.NamedStmt),
+		make(map[string]*sqlx.Stmt),
 	}
+}
+
+func (d *DBxTableMentions) findOrPrepareNamedStmt(q string) (*sqlx.NamedStmt, error) {
+	stmt := d.NamedStatements[q]
+	if stmt != nil {
+		return stmt, nil
+	}
+
+	var err error
+	stmt, err = d.PrepareNamed(q)
+	if err != nil {
+		return nil, err
+	}
+
+	d.NamedStatements[q] = stmt
+	return stmt, err
+}
+func (d *DBxTableMentions) findOrPrepareStmt(q string) (*sqlx.Stmt, error) {
+	stmt := d.Statements[q]
+	if stmt != nil {
+		return stmt, nil
+	}
+
+	var err error
+	stmt, err = d.Preparex(q)
+	if err != nil {
+		return nil, err
+	}
+
+	d.Statements[q] = stmt
+	return stmt, err
 }
 
 func (d *DBxTableMentions) SelectMentions(postid int64) ([]int64, error) {
@@ -91,13 +126,20 @@ func (d *DBxTableMentions) InsertMentions(postid int64, actorid int64, mentioned
 		return nil
 	}
 
-	values := make([]string, len(mentionedActorIds))
+	plcs := make([]string, len(mentionedActorIds))
+	values := make([]any, 0, 3*len(mentionedActorIds))
 	for i, mentionedActorId := range mentionedActorIds {
-		values[i] = fmt.Sprintf("(%d, %d, %d)", postid, actorid, mentionedActorId)
+		plcs[i] = "(?, ?, ?)"
+		values = append(values, postid, actorid, mentionedActorId)
 	}
 
-	q := fmt.Sprintf("INSERT INTO mentions (post_id, actor_id, subject_id) VALUES %s", strings.Join(values, ","))
-	_, err := d.Exec(q)
+	q := fmt.Sprintf("INSERT INTO mentions (post_id, actor_id, subject_id) VALUES %s", strings.Join(plcs, ","))
+	stmt, err := d.findOrPrepareStmt(q)
+	if err != nil {
+		return err
+	}
+
+	_, err = stmt.Exec(values...)
 
 	return err
 }

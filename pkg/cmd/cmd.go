@@ -129,6 +129,12 @@ var WithDb = CombineFlags(
 		Value:   "NORMAL",
 		EnvVars: []string{"GO_BLUESKY_DB_SYNCHRONOUS_MODE"},
 	},
+	&cli.IntFlag{
+		Name:    "db-wal-autocheckpoint",
+		Usage:   "db wal autocheckpoint",
+		Value:   0,
+		EnvVars: []string{"GO_BLUESKY_DB_WAL_AUTOCHECKPOINT"},
+	},
 	&cli.BoolFlag{
 		Name:    "extended-indexing",
 		Usage:   "index likes and reposts and interaction counts",

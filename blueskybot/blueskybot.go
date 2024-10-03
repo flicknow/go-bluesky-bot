@@ -118,21 +118,25 @@ var BlueskyBot = &cli.Command{
 		}()
 		defer func() { pinger.Stop() }()
 
+		var fEvt *firehose.FirehoseEvent
+		var lEvt *firehose.LabelerEvent
+		var post *dbx.PostRow
+		var seq int64
 	LOOP:
 		for !shutdown {
 			select {
 			case <-ctx.Done():
 				fmt.Println("Interrupt!")
 				return nil
-			case evt := <-lCh:
-				if evt == nil {
+			case lEvt = <-lCh:
+				if lEvt == nil {
 					fmt.Println("> END OF LOOP")
 					break LOOP
 				}
 
-				switch evt.Type {
+				switch lEvt.Type {
 				case firehose.EvtKindError:
-					err := evt.Error
+					err = lEvt.Error
 					if err == nil {
 						continue
 					}
@@ -152,24 +156,22 @@ var BlueskyBot = &cli.Command{
 						log.Printf("received labeler firehose error: %+v\n", err)
 					}
 				case firehose.EvtKindLabelerInfo:
-					info := evt.Info
-					if info == nil {
+					if lEvt.Info == nil {
 						continue
 					}
-					fmt.Println(utils.Dump(info))
+					fmt.Println(utils.Dump(lEvt.Info))
 				case firehose.EvtKindLabel:
-					labels := evt.Labels
-					if labels == nil {
+					if lEvt.Labels == nil {
 						continue
 					}
 
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Label(labels.Labels) })()
+					err = dbx.RetryDbIsLocked(func() error { return indexer.Label(lEvt.Labels.Labels) })()
 					if err != nil {
 						continue
 					}
 				}
 
-				seq := evt.Seq
+				seq = lEvt.Seq
 				if seq != 0 {
 					labeler.Ack(seq)
 					lastLabelerSeen = seq
@@ -177,15 +179,15 @@ var BlueskyBot = &cli.Command{
 						lastLabelerPing = seq
 					}
 				}
-			case evt := <-fCh:
-				if evt == nil {
+			case fEvt = <-fCh:
+				if fEvt == nil {
 					fmt.Println("> END OF LOOP")
 					break LOOP
 				}
 
-				switch evt.Type {
+				switch fEvt.Type {
 				case firehose.EvtKindError:
-					err := evt.Error
+					err = fEvt.Error
 					if err == nil {
 						continue
 					}
@@ -205,23 +207,21 @@ var BlueskyBot = &cli.Command{
 						log.Printf("received firehose error: %+v\n", err)
 					}
 				case firehose.EvtKindFirehoseLike:
-					likeRef := evt.Like
-					if likeRef == nil {
+					if fEvt.Like == nil {
 						continue
 					}
 
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Like(likeRef) })()
+					err = dbx.RetryDbIsLocked(func() error { return indexer.Like(fEvt.Like) })()
 					if err != nil {
 						continue
 					}
 				case firehose.EvtKindFirehosePost:
-					postRef := evt.Post
-					if postRef == nil {
+					if fEvt.Post == nil {
 						continue
 					}
 
-					err := dbx.RetryDbIsLocked(func() error {
-						post, err := indexer.Post(postRef)
+					err = dbx.RetryDbIsLocked(func() error {
+						post, err = indexer.Post(fEvt.Post)
 						if err != nil {
 							return err
 						}
@@ -236,75 +236,72 @@ var BlueskyBot = &cli.Command{
 						continue
 					}
 				case firehose.EvtKindFirehoseRepost:
-					repostRef := evt.Repost
-					if repostRef == nil {
+					if fEvt.Repost == nil {
 						continue
 					}
 
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Repost(repostRef) })()
+					err = dbx.RetryDbIsLocked(func() error { return indexer.Repost(fEvt.Repost) })()
 					if err != nil {
 						continue
 					}
 				case firehose.EvtKindFirehoseProfile:
-					newskie := evt.Profile
-					if newskie == "" {
+					if fEvt.Profile == "" {
 						continue
 					}
 
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Newskie(newskie) })()
+					err = dbx.RetryDbIsLocked(func() error { return indexer.Newskie(fEvt.Profile) })()
 					if err != nil {
 						continue
 					}
 				case firehose.EvtKindFirehoseBlock:
-					blockRef := evt.Block
-					if blockRef == nil {
+					if fEvt.Block == nil {
 						continue
 					}
 
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Block(blockRef) })()
+					err = dbx.RetryDbIsLocked(func() error { return indexer.Block(fEvt.Block) })()
 					if err != nil {
 						continue
 					}
-				case firehose.EvtKindFirehoseFollow:
-					followRef := evt.Follow
-					if followRef == nil {
-						continue
-					}
+					/*
+						case firehose.EvtKindFirehoseFollow:
+							followRef := fEvt.Follow
+							if followRef == nil {
+								continue
+							}
 
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Follow(followRef) })()
-					if err != nil {
-						continue
-					}
+								err := dbx.RetryDbIsLocked(func() error { return indexer.Follow(followRef) })()
+								if err != nil {
+									continue
+								}
+					*/
 				case firehose.EvtKindFirehoseDelete:
-					deleted := evt.Delete
-					if deleted == "" {
+					if fEvt.Delete == "" {
 						continue
 					}
 
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Delete(deleted) })()
+					err = dbx.RetryDbIsLocked(func() error { return indexer.Delete(fEvt.Delete) })()
 					if err != nil {
 						continue
 					}
 				case firehose.EvtKindFirehoseTombstone:
-					tombstone := evt.Tombstone
-					if tombstone == "" {
+					if fEvt.Tombstone == "" {
 						continue
 					}
 
 					blockRef := &firehose.BlockRef{
 						Subject: client.Did(),
 						Ref: &atproto.RepoStrongRef{
-							Uri: fmt.Sprintf("at://%s/tombstone/tombstone", tombstone),
+							Uri: fmt.Sprintf("at://%s/tombstone/tombstone", fEvt.Tombstone),
 						},
 					}
 
-					err := dbx.RetryDbIsLocked(func() error { return indexer.Block(blockRef) })()
+					err = dbx.RetryDbIsLocked(func() error { return indexer.Block(blockRef) })()
 					if err != nil {
 						continue
 					}
 				}
 
-				seq := evt.Seq
+				seq = fEvt.Seq
 				if seq != 0 {
 					hose.Ack(seq)
 					lastFirehoseSeen = seq

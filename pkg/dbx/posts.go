@@ -25,8 +25,10 @@ type PostRow struct {
 }
 
 type DBxTablePosts struct {
-	*sqlx.DB `dbx-table:"posts" dbx-pk:"post_id"`
-	Path     string
+	*sqlx.DB        `dbx-table:"posts" dbx-pk:"post_id"`
+	Path            string
+	NamedStatements map[string]*sqlx.NamedStmt
+	Statements      map[string]*sqlx.Stmt
 }
 
 var PostSchema = `
@@ -49,10 +51,44 @@ ON posts(labeled, post_id DESC);
 
 func NewPostTable(dir string) *DBxTablePosts {
 	path := filepath.Join(dir, "posts.db")
-	return &DBxTablePosts{
+	table := &DBxTablePosts{
 		SQLxMustOpen(path, PostSchema),
 		path,
+		make(map[string]*sqlx.NamedStmt),
+		make(map[string]*sqlx.Stmt),
 	}
+	return table
+}
+
+func (d *DBxTablePosts) findOrPrepareNamedStmt(q string) (*sqlx.NamedStmt, error) {
+	stmt := d.NamedStatements[q]
+	if stmt != nil {
+		return stmt, nil
+	}
+
+	var err error
+	stmt, err = d.PrepareNamed(q)
+	if err != nil {
+		return nil, err
+	}
+
+	d.NamedStatements[q] = stmt
+	return stmt, err
+}
+func (d *DBxTablePosts) findOrPrepareStmt(q string) (*sqlx.Stmt, error) {
+	stmt := d.Statements[q]
+	if stmt != nil {
+		return stmt, nil
+	}
+
+	var err error
+	stmt, err = d.Preparex(q)
+	if err != nil {
+		return nil, err
+	}
+
+	d.Statements[q] = stmt
+	return stmt, err
 }
 
 func (d *DBxTablePosts) FindByUris(uris []string) ([]*PostRow, error) {
@@ -66,7 +102,12 @@ func (d *DBxTablePosts) FindByUris(uris []string) ([]*PostRow, error) {
 	}
 
 	q := fmt.Sprintf("SELECT * FROM posts WHERE uri IN (%s)", strings.Join(plcs, ","))
-	err := d.Select(&postrows, q, params...)
+	stmt, err := d.findOrPrepareStmt(q)
+	if err != nil {
+		return nil, err
+	}
+
+	err = stmt.Select(&postrows, params...)
 	if (err != nil) && errors.Is(err, sql.ErrNoRows) {
 		return postrows, nil
 	} else if err != nil {
@@ -81,8 +122,13 @@ func (d *DBxTablePosts) FindByUris(uris []string) ([]*PostRow, error) {
 }
 
 func (d *DBxTablePosts) FindByUri(uri string) (*PostRow, error) {
+	stmt, err := d.findOrPrepareStmt("SELECT * FROM posts WHERE uri = ?")
+	if err != nil {
+		return nil, err
+	}
+
 	postrow := &PostRow{}
-	err := d.Get(postrow, "SELECT * FROM posts WHERE uri = ?", utils.DehydrateUri(uri))
+	err = stmt.Get(postrow, utils.DehydrateUri(uri))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -95,8 +141,13 @@ func (d *DBxTablePosts) FindByUri(uri string) (*PostRow, error) {
 }
 
 func (d *DBxTablePosts) FindPostIdByUri(uri string) (int64, error) {
+	stmt, err := d.findOrPrepareStmt("SELECT post_id FROM posts WHERE uri = ?")
+	if err != nil {
+		return 0, err
+	}
+
 	var postid int64 = 0
-	err := d.Get(&postid, "SELECT post_id FROM posts WHERE uri = ?", utils.DehydrateUri(uri))
+	err = stmt.Get(&postid, utils.DehydrateUri(uri))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, nil
@@ -108,8 +159,13 @@ func (d *DBxTablePosts) FindPostIdByUri(uri string) (int64, error) {
 }
 
 func (d *DBxTablePosts) SelectPostsByActorId(actorid int64, before int64, limit int) ([]*PostRow, error) {
+	stmt, err := d.findOrPrepareStmt("SELECT * FROM posts WHERE actor_id = $1 AND post_id < $2 ORDER BY post_id DESC LIMIT $3")
+	if err != nil {
+		return nil, err
+	}
+
 	postrows := make([]*PostRow, 0, limit)
-	err := d.Select(&postrows, "SELECT * FROM posts WHERE actor_id = $1 AND post_id < $2 ORDER BY post_id DESC LIMIT $3", actorid, before, limit)
+	err = stmt.Select(&postrows, actorid, before, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +294,12 @@ func (d *DBxTablePosts) MarkLabeled(postid int64) error {
 }
 
 func (d *DBxTablePosts) InsertPost(p *PostRow) (*PostRow, error) {
-	res, err := d.NamedExec("INSERT INTO posts (uri, actor_id, created_at, labeled) VALUES (:uri, :actor_id, :created_at, :labeled)", p)
+	stmt, err := d.findOrPrepareNamedStmt("INSERT INTO posts (uri, actor_id, created_at, labeled) VALUES (:uri, :actor_id, :created_at, :labeled)")
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := stmt.Exec(p)
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +315,10 @@ func (d *DBxTablePosts) InsertPost(p *PostRow) (*PostRow, error) {
 }
 
 func (d *DBxTablePosts) DeletePost(postid int64) error {
-	_, err := d.Exec("DELETE FROM posts WHERE post_id = $1", postid)
+	stmt, err := d.findOrPrepareStmt("DELETE FROM posts WHERE post_id = $1")
+	if err != nil {
+		return err
+	}
+	_, err = stmt.Exec(postid)
 	return err
 }

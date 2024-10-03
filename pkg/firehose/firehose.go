@@ -36,6 +36,7 @@ const (
 
 var DefaultBgsHost = "https://bsky.network"
 var DmRegex = regexp.MustCompile(`(?i)^\W*DM\W*\s@\w+\.`)
+var MARK = "did:plc:wzsilnxf24ehtmmc3gssy5bu"
 
 type BareUri struct {
 	Uri string
@@ -250,19 +251,22 @@ func (f *Firehose) Ack(seq int64) {
 }
 
 func (f *Firehose) proxyStream(sCh <-chan *SubscriberEvent) <-chan *FirehoseEvent {
-	fCh := make(chan *FirehoseEvent, 1)
+	fCh := make(chan *FirehoseEvent, ChannelBuffer)
 
+	var sEvt *SubscriberEvent
+	var lEvt *FirehoseEvent
+	var seq int64
 	lastSeq := f.s.cursor
 	go func() {
-		for sEvt := range sCh {
-			lEvt := f.processSubscriberEvent(sEvt)
+		for sEvt = range sCh {
+			lEvt = f.processSubscriberEvent(sEvt)
 			if lEvt == nil {
 				continue
 			}
 
-			seq := lEvt.Seq
-			if (lastSeq == 0) && (seq != 0) {
-				lastSeq = seq
+			seq = lEvt.Seq
+			if (lastSeq == 0) && (lEvt.Seq != 0) {
+				lastSeq = lEvt.Seq
 			}
 
 			if (seq != 0) && ((seq - lastSeq) > 1000) {
@@ -310,6 +314,8 @@ func (f *Firehose) Restart(ctx context.Context) (<-chan *FirehoseEvent, error) {
 	return f.proxyStream(ch), nil
 }
 
+var CommitEvt comatproto.SyncSubscribeRepos_Commit
+
 func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent {
 	if sEvt.Error != nil {
 		return &FirehoseEvent{Error: sEvt.Error, Type: EvtKindError}
@@ -355,27 +361,32 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 	case "#commit":
 		ctx := f.s.conCtx
 
-		var evt comatproto.SyncSubscribeRepos_Commit
-		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
+		if err := CommitEvt.UnmarshalCBOR(sEvt.Body); err != nil {
 			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #commit: %w", err), Type: EvtKindError}
 		}
 
-		if evt.TooBig {
-			log.Printf("skipping too big events for now: %d\n", evt.Seq)
+		if CommitEvt.TooBig {
 			return nil
 		}
 
-		r, err := repo.ReadRepoFromCar(ctx, bytes.NewReader(evt.Blocks))
+		r, err := repo.ReadRepoFromCar(ctx, bytes.NewReader(CommitEvt.Blocks))
 		if err != nil {
-			err = fmt.Errorf("reading repo from car (seq: %d, len: %d): %w", evt.Seq, len(evt.Blocks), err)
+			err = fmt.Errorf("reading repo from car (seq: %d, len: %d): %w", CommitEvt.Seq, len(CommitEvt.Blocks), err)
 			return &FirehoseEvent{Error: err, Type: EvtKindError}
 		}
-		for _, op := range evt.Ops {
+		for _, op := range CommitEvt.Ops {
 			path := op.Path
 			parts := strings.SplitN(path, "/", 2)
 			lextype := parts[0]
-			uri := fmt.Sprintf("at://%s/%s", evt.Repo, path)
+			uri := fmt.Sprintf("at://%s/%s", CommitEvt.Repo, path)
 			if !isHandledType(lextype) {
+				continue
+			}
+			if lextype == "app.bsky.feed.like" {
+				if CommitEvt.Repo != MARK {
+					continue
+				}
+			} else if lextype == "app.bsky.graph.follow" {
 				continue
 			}
 
@@ -405,7 +416,7 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 							return nil
 						}
 					}
-					return &FirehoseEvent{Seq: evt.Seq, Like: &LikeRef{like, ref, evt.Seq}, Type: EvtKindFirehoseLike}
+					return &FirehoseEvent{Seq: CommitEvt.Seq, Like: &LikeRef{like, ref, CommitEvt.Seq}, Type: EvtKindFirehoseLike}
 				case "app.bsky.feed.post":
 					post := &appbsky.FeedPost{}
 					if r, ok := rec.(*appbsky.FeedPost); ok {
@@ -417,22 +428,24 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 							return nil
 						}
 					}
-					return &FirehoseEvent{Seq: evt.Seq, Post: NewPostRef(post, ref, evt.Seq), Type: EvtKindFirehosePost}
-				case "app.bsky.feed.repost":
-					repost := &appbsky.FeedRepost{}
-					if r, ok := rec.(*appbsky.FeedRepost); ok {
-						repost = r
-					} else {
-						err = utils.DecodeCBOR(rec, &repost)
-						if err != nil {
-							log.Printf("error decoding %s: %+v", uri, err)
-							return nil
-						}
-					}
-					return &FirehoseEvent{Seq: evt.Seq, Repost: &RepostRef{repost, ref, evt.Seq}, Type: EvtKindFirehoseRepost}
+					return &FirehoseEvent{Seq: CommitEvt.Seq, Post: NewPostRef(post, ref, CommitEvt.Seq), Type: EvtKindFirehosePost}
+					/*
+						case "app.bsky.feed.repost":
+							repost := &appbsky.FeedRepost{}
+							if r, ok := rec.(*appbsky.FeedRepost); ok {
+								repost = r
+							} else {
+								err = utils.DecodeCBOR(rec, &repost)
+								if err != nil {
+									log.Printf("error decoding %s: %+v", uri, err)
+									return nil
+								}
+							}
+							return &FirehoseEvent{Seq: evt.Seq, Repost: &RepostRef{repost, ref, evt.Seq}, Type: EvtKindFirehoseRepost}
+					*/
 				case "app.bsky.actor.profile":
 					if ek == repomgr.EvtKindCreateRecord {
-						return &FirehoseEvent{Seq: evt.Seq, Profile: evt.Repo, Type: EvtKindFirehoseProfile}
+						return &FirehoseEvent{Seq: CommitEvt.Seq, Profile: CommitEvt.Repo, Type: EvtKindFirehoseProfile}
 					}
 				case "app.bsky.graph.block":
 					block := &appbsky.GraphBlock{}
@@ -445,22 +458,24 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 							return nil
 						}
 					}
-					return &FirehoseEvent{Seq: evt.Seq, Block: &BlockRef{block.Subject, ref, evt.Seq}, Type: EvtKindFirehoseBlock}
-				case "app.bsky.graph.follow":
-					follow := &appbsky.GraphFollow{}
-					if r, ok := rec.(*appbsky.GraphFollow); ok {
-						follow = r
-					} else {
-						err = utils.DecodeCBOR(rec, &follow)
-						if err != nil {
-							log.Printf("error decoding %s: %+v", uri, err)
-							return nil
-						}
-					}
-					return &FirehoseEvent{Seq: evt.Seq, Follow: &FollowRef{follow.Subject, ref, evt.Seq}, Type: EvtKindFirehoseFollow}
+					return &FirehoseEvent{Seq: CommitEvt.Seq, Block: &BlockRef{block.Subject, ref, CommitEvt.Seq}, Type: EvtKindFirehoseBlock}
+					/*
+						case "app.bsky.graph.follow":
+							follow := &appbsky.GraphFollow{}
+							if r, ok := rec.(*appbsky.GraphFollow); ok {
+								follow = r
+							} else {
+								err = utils.DecodeCBOR(rec, &follow)
+								if err != nil {
+									log.Printf("error decoding %s: %+v", uri, err)
+									return nil
+								}
+							}
+							return &FirehoseEvent{Seq: evt.Seq, Follow: &FollowRef{follow.Subject, ref, evt.Seq}, Type: EvtKindFirehoseFollow}
+					*/
 				}
 			case repomgr.EvtKindDeleteRecord:
-				return &FirehoseEvent{Seq: evt.Seq, Delete: uri, Type: EvtKindFirehoseDelete}
+				return &FirehoseEvent{Seq: CommitEvt.Seq, Delete: uri, Type: EvtKindFirehoseDelete}
 			}
 		}
 

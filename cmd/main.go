@@ -34,6 +34,7 @@ func main() {
 		blueskybot.MigrateCmd,
 		blueskybot.MigrateListCmd,
 		blueskybot.PruneCmd,
+		blueskybot.RequeueCmd,
 		blueskybot.ServerCmd,
 		blueskybot.SubscribeLabelsCmd,
 	}

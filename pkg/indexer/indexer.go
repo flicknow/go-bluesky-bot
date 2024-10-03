@@ -376,15 +376,6 @@ func (i *Indexer) runLabelerOnceForFollows(rateLimit int64) (int64, error) {
 func (i *Indexer) runLabelerOnce(rateLimit int64) {
 	remaining := rateLimit
 
-	labelHits, err := i.runLabelerOnceForLabels(remaining / 3)
-	if err != nil {
-		fmt.Printf("error indexing labels: %+v\n", err)
-	}
-	if i.debug {
-		fmt.Printf("> indexed %d/%d labels\n", labelHits, remaining/3)
-	}
-	remaining -= labelHits
-
 	actorHits, err := i.runLabelerOnceForActors(remaining / 2)
 	if err != nil {
 		fmt.Printf("error indexing actors: %+v\n", err)
@@ -757,7 +748,7 @@ func (i *Indexer) Delete(uri string) error {
 	} else if strings.Contains(uri, "app.bsky.feed.repost") {
 		err = db.DeleteRepost(uri)
 	} else if strings.Contains(uri, "app.bsky.graph.follow") {
-		err = db.DeleteFollow(uri)
+		//err = db.DeleteFollow(uri)
 	}
 	if err != nil {
 		log.Printf("error deleting %s: %+v\n", uri, err)

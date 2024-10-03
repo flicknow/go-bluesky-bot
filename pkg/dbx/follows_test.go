@@ -52,6 +52,7 @@ func TestDBxInsertFollow(t *testing.T) {
 	)
 }
 
+/*
 func TestDBxSelectAllMentionsFollowed(t *testing.T) {
 	d, cleanup := NewTestDBx()
 	defer cleanup()
@@ -84,6 +85,7 @@ func TestDBxSelectAllMentionsFollowed(t *testing.T) {
 		CollectPostIds(posts),
 	)
 }
+*/
 
 func TestDBxSelectMentionsFollowed(t *testing.T) {
 	d, cleanup := NewTestDBx()

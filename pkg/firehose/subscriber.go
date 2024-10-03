@@ -19,6 +19,7 @@ import (
 	"github.com/flicknow/go-bluesky-bot/pkg/utils"
 )
 
+var ChannelBuffer = 100
 var ErrFatal = errors.New("FATAL subscriber error")
 
 const (
@@ -117,7 +118,7 @@ func (s *Subscriber) Start(ctx context.Context) (<-chan *SubscriberEvent, error)
 		}
 	}
 
-	ch := make(chan *SubscriberEvent, 1)
+	ch := make(chan *SubscriberEvent, ChannelBuffer)
 
 	if s.con == nil {
 		conCtx, cancel := context.WithCancel(ctx)
@@ -164,8 +165,9 @@ func (s *Subscriber) startStream(ctx context.Context, ch chan *SubscriberEvent) 
 	}
 
 	go func() {
+		var err error
 		for s.con != nil {
-			err := s.consumeStream(ctx, con, ch)
+			err = s.consumeStream(ctx, con, ch)
 
 			if err != nil {
 				ch <- &SubscriberEvent{Error: fmt.Errorf("%w: %w", ErrFatal, err)}
@@ -185,10 +187,11 @@ func (s *Subscriber) consumeStream(ctx context.Context, con *websocket.Conn, ch 
 		t := time.NewTicker(time.Second * 30)
 		defer t.Stop()
 
+		var err error
 		for {
 			select {
 			case <-t.C:
-				if err := con.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(time.Second*10)); err != nil {
+				if err = con.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(time.Second*10)); err != nil {
 					log.Printf("failed to ping: %s", err)
 					cancel()
 				}
@@ -217,6 +220,10 @@ func (s *Subscriber) consumeStream(ctx context.Context, con *websocket.Conn, ch 
 		return nil
 	})
 
+	var mt int
+	var r io.Reader
+	var err error
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -224,7 +231,7 @@ func (s *Subscriber) consumeStream(ctx context.Context, con *websocket.Conn, ch 
 		default:
 		}
 
-		mt, r, err := con.NextReader()
+		mt, r, err = con.NextReader()
 		if err != nil {
 			return err
 		}
@@ -237,7 +244,7 @@ func (s *Subscriber) consumeStream(ctx context.Context, con *websocket.Conn, ch 
 		}
 
 		var header events.EventHeader
-		if err := header.UnmarshalCBOR(r); err != nil {
+		if err = header.UnmarshalCBOR(r); err != nil {
 			return fmt.Errorf("reading header: %w", err)
 		}
 
@@ -247,7 +254,6 @@ func (s *Subscriber) consumeStream(ctx context.Context, con *websocket.Conn, ch 
 				return err
 			}
 
-			var err error
 			if errframe.Error != "" {
 				err = errors.New(errframe.Error)
 			}

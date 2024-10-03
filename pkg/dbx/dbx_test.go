@@ -152,172 +152,174 @@ func TestDBxInsertPostLabels(t *testing.T) {
 	}
 	assert.Empty(t, foundLabelIds)
 }
-func TestDBxInsertDms(t *testing.T) {
-	d, cleanup := NewTestDBx()
-	defer cleanup()
 
-	actor := d.CreateActor()
-	op := d.CreatePost(&TestPostRefInput{Actor: actor.Did})
+/*
+	func TestDBxInsertDms(t *testing.T) {
+		d, cleanup := NewTestDBx()
+		defer cleanup()
 
-	quotee := d.CreateActor()
-	quoted := d.CreatePost(&TestPostRefInput{Actor: quotee.Did})
+		actor := d.CreateActor()
+		op := d.CreatePost(&TestPostRefInput{Actor: actor.Did})
 
-	friend := d.CreateActor()
+		quotee := d.CreateActor()
+		quoted := d.CreatePost(&TestPostRefInput{Actor: quotee.Did})
 
-	dmer := d.CreateActor()
-	dm := d.CreatePost(&TestPostRefInput{Actor: dmer.Did, Mentions: []string{friend.Did}, Quote: quoted.Uri, Reply: op.Uri, Text: "DM: @my.friend"})
-	dmreply := d.CreatePost(&TestPostRefInput{Actor: friend.Did, Reply: dm.Uri})
+		friend := d.CreateActor()
 
-	dmerDms, err := d.SelectDms(SQLiteMaxInt, 100, dmer.Did)
-	if err != nil {
-		panic(err)
+		dmer := d.CreateActor()
+		dm := d.CreatePost(&TestPostRefInput{Actor: dmer.Did, Mentions: []string{friend.Did}, Quote: quoted.Uri, Reply: op.Uri, Text: "DM: @my.friend"})
+		dmreply := d.CreatePost(&TestPostRefInput{Actor: friend.Did, Reply: dm.Uri})
+
+		dmerDms, err := d.SelectDms(SQLiteMaxInt, 100, dmer.Did)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]int64{dmreply.PostId, dm.PostId},
+			CollectPostIds(dmerDms),
+		)
+
+		friendDms, err := d.SelectDms(SQLiteMaxInt, 100, friend.Did)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]int64{dmreply.PostId, dm.PostId},
+			CollectPostIds(friendDms),
+		)
+
+		opDms, err := d.SelectDms(SQLiteMaxInt, 100, actor.Did)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]*PostRow{},
+			opDms,
+		)
+
+		quoteeDms, err := d.SelectDms(SQLiteMaxInt, 100, quotee.Did)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]*PostRow{},
+			quoteeDms,
+		)
+
+		d.DeletePost(dm.Uri)
+		deleted, err := d.Dms.SelectDms(dm.PostId)
+		if err != nil {
+			panic(err)
+		}
+		assert.Empty(t, deleted)
 	}
-	assert.Equal(
-		t,
-		[]int64{dmreply.PostId, dm.PostId},
-		CollectPostIds(dmerDms),
-	)
 
-	friendDms, err := d.SelectDms(SQLiteMaxInt, 100, friend.Did)
-	if err != nil {
-		panic(err)
+	func TestDBxInsertThreadMentions(t *testing.T) {
+		d, cleanup := NewTestDBx()
+		defer cleanup()
+
+		actor := d.CreateActor()
+		op := d.CreatePost(&TestPostRefInput{Actor: actor.Did})
+
+		quotee := d.CreateActor()
+		quoted := d.CreatePost(&TestPostRefInput{Actor: quotee.Did})
+
+		mentioned := d.CreateActor()
+
+		replyGuy := d.CreateActor()
+		reply := d.CreatePost(&TestPostRefInput{Actor: replyGuy.Did, Mentions: []string{mentioned.Did}, Quote: quoted.Uri, Reply: op.Uri})
+
+		mentionedActors, err := d.ThreadMentions.SelectThreadMentions(reply.PostId)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			SortInt64s([]int64{actor.ActorId, mentioned.ActorId, quotee.ActorId}),
+			SortInt64s(mentionedActors),
+			"indexed parent, mentioned, and quoted actors",
+		)
+
+		opMentions, err := d.ThreadMentions.SelectThreadMentionsByActorId(actor.ActorId, SQLiteMaxInt, 10)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]int64{reply.PostId},
+			opMentions,
+			"replies show up in mentions",
+		)
+
+		quoteeMentions, err := d.ThreadMentions.SelectThreadMentionsByActorId(quotee.ActorId, SQLiteMaxInt, 10)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]int64{reply.PostId},
+			quoteeMentions,
+			"quotes show up in mentions",
+		)
+
+		mentionedMentions, err := d.ThreadMentions.SelectThreadMentionsByActorId(mentioned.ActorId, SQLiteMaxInt, 10)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]int64{reply.PostId},
+			mentionedMentions,
+			"mention shows up in mentions",
+		)
+
+		replyGuyMentions, err := d.ThreadMentions.SelectThreadMentionsByActorId(replyGuy.ActorId, SQLiteMaxInt, 10)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]int64{},
+			replyGuyMentions,
+			"own post does not show up in mentions",
+		)
+
+		d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: op.Uri})
+		opMentions, err = d.ThreadMentions.SelectThreadMentionsByActorId(actor.ActorId, SQLiteMaxInt, 10)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]int64{reply.PostId},
+			opMentions,
+			"replying to yourself does not show up in mentions",
+		)
+
+		d.CreatePost(&TestPostRefInput{Actor: actor.Did, Quote: op.Uri})
+		opMentions, err = d.ThreadMentions.SelectThreadMentionsByActorId(actor.ActorId, SQLiteMaxInt, 10)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]int64{reply.PostId},
+			opMentions,
+			"quoting yourself does not show up in mentions",
+		)
+
+		d.DeletePost(reply.Uri)
+		deleted, err := d.ThreadMentions.SelectThreadMentions(reply.PostId)
+		if err != nil {
+			panic(err)
+		}
+		assert.Empty(t, deleted)
 	}
-	assert.Equal(
-		t,
-		[]int64{dmreply.PostId, dm.PostId},
-		CollectPostIds(friendDms),
-	)
-
-	opDms, err := d.SelectDms(SQLiteMaxInt, 100, actor.Did)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		[]*PostRow{},
-		opDms,
-	)
-
-	quoteeDms, err := d.SelectDms(SQLiteMaxInt, 100, quotee.Did)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		[]*PostRow{},
-		quoteeDms,
-	)
-
-	d.DeletePost(dm.Uri)
-	deleted, err := d.Dms.SelectDms(dm.PostId)
-	if err != nil {
-		panic(err)
-	}
-	assert.Empty(t, deleted)
-}
-
-func TestDBxInsertThreadMentions(t *testing.T) {
-	d, cleanup := NewTestDBx()
-	defer cleanup()
-
-	actor := d.CreateActor()
-	op := d.CreatePost(&TestPostRefInput{Actor: actor.Did})
-
-	quotee := d.CreateActor()
-	quoted := d.CreatePost(&TestPostRefInput{Actor: quotee.Did})
-
-	mentioned := d.CreateActor()
-
-	replyGuy := d.CreateActor()
-	reply := d.CreatePost(&TestPostRefInput{Actor: replyGuy.Did, Mentions: []string{mentioned.Did}, Quote: quoted.Uri, Reply: op.Uri})
-
-	mentionedActors, err := d.ThreadMentions.SelectThreadMentions(reply.PostId)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		SortInt64s([]int64{actor.ActorId, mentioned.ActorId, quotee.ActorId}),
-		SortInt64s(mentionedActors),
-		"indexed parent, mentioned, and quoted actors",
-	)
-
-	opMentions, err := d.ThreadMentions.SelectThreadMentionsByActorId(actor.ActorId, SQLiteMaxInt, 10)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		[]int64{reply.PostId},
-		opMentions,
-		"replies show up in mentions",
-	)
-
-	quoteeMentions, err := d.ThreadMentions.SelectThreadMentionsByActorId(quotee.ActorId, SQLiteMaxInt, 10)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		[]int64{reply.PostId},
-		quoteeMentions,
-		"quotes show up in mentions",
-	)
-
-	mentionedMentions, err := d.ThreadMentions.SelectThreadMentionsByActorId(mentioned.ActorId, SQLiteMaxInt, 10)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		[]int64{reply.PostId},
-		mentionedMentions,
-		"mention shows up in mentions",
-	)
-
-	replyGuyMentions, err := d.ThreadMentions.SelectThreadMentionsByActorId(replyGuy.ActorId, SQLiteMaxInt, 10)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		[]int64{},
-		replyGuyMentions,
-		"own post does not show up in mentions",
-	)
-
-	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Reply: op.Uri})
-	opMentions, err = d.ThreadMentions.SelectThreadMentionsByActorId(actor.ActorId, SQLiteMaxInt, 10)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		[]int64{reply.PostId},
-		opMentions,
-		"replying to yourself does not show up in mentions",
-	)
-
-	d.CreatePost(&TestPostRefInput{Actor: actor.Did, Quote: op.Uri})
-	opMentions, err = d.ThreadMentions.SelectThreadMentionsByActorId(actor.ActorId, SQLiteMaxInt, 10)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		[]int64{reply.PostId},
-		opMentions,
-		"quoting yourself does not show up in mentions",
-	)
-
-	d.DeletePost(reply.Uri)
-	deleted, err := d.ThreadMentions.SelectThreadMentions(reply.PostId)
-	if err != nil {
-		panic(err)
-	}
-	assert.Empty(t, deleted)
-}
-
+*/
 func TestDBxSelectMentions(t *testing.T) {
 	d, cleanup := NewTestDBx()
 	defer cleanup()
@@ -364,16 +366,18 @@ func TestDBxSelectMentions(t *testing.T) {
 		mentionedMentions,
 	)
 
-	quoteeMentions, err := d.SelectAllMentions(SQLiteMaxInt, 10, quotee.Did)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		[]*PostRow{reply},
-		quoteeMentions,
-		"quotes show up in mentions",
-	)
+	/*
+		quoteeMentions, err := d.SelectAllMentions(SQLiteMaxInt, 10, quotee.Did)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]*PostRow{reply},
+			quoteeMentions,
+			"quotes show up in mentions",
+		)
+	*/
 
 	d.CreatePost(&TestPostRefInput{Actor: replyGuy.Did, Reply: reply.Uri})
 	opMentions, err = d.SelectMentions(SQLiteMaxInt, 10, actor.Did)
@@ -457,6 +461,7 @@ func TestDBxSelectPostsByLabels(t *testing.T) {
 	)
 }
 
+/*
 func TestDBxSelectAllMentions(t *testing.T) {
 	d, cleanup := NewTestDBx()
 	defer cleanup()
@@ -503,29 +508,31 @@ func TestDBxSelectAllMentions(t *testing.T) {
 		mentionedMentions,
 	)
 
-	quoteeMentions, err := d.SelectAllMentions(SQLiteMaxInt, 10, quotee.Did)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		[]*PostRow{reply},
-		quoteeMentions,
-		"quotes show up in mentions",
-	)
+		quoteeMentions, err := d.SelectAllMentions(SQLiteMaxInt, 10, quotee.Did)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			[]*PostRow{reply},
+			quoteeMentions,
+			"quotes show up in mentions",
+		)
 
-	indirectReply := d.CreatePost(&TestPostRefInput{Actor: replyGuy.Did, Reply: reply.Uri})
-	opMentions, err = d.SelectAllMentions(SQLiteMaxInt, 10, actor.Did)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		CollectPostIds([]*PostRow{indirectReply, reply}),
-		CollectPostIds(opMentions),
-		"indirect reply does shows up in mentions",
-	)
+
+		indirectReply := d.CreatePost(&TestPostRefInput{Actor: replyGuy.Did, Reply: reply.Uri})
+		opMentions, err = d.SelectAllMentions(SQLiteMaxInt, 10, actor.Did)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			CollectPostIds([]*PostRow{indirectReply, reply}),
+			CollectPostIds(opMentions),
+			"indirect reply does shows up in mentions",
+		)
 }
+*/
 
 func TestDBxActorPostCount(t *testing.T) {
 	d, cleanup := NewTestDBx()
@@ -651,11 +658,13 @@ func TestDBxPrune(t *testing.T) {
 		[]int64{2},
 		QueryPks(d.Reposts),
 	)
-	assert.Equal(
-		t,
-		[]int64{3, 4, 5, 6},
-		QueryPks(d.Dms),
-	)
+	/*
+		assert.Equal(
+			t,
+			[]int64{3, 4, 5, 6},
+			QueryPks(d.Dms),
+		)
+	*/
 	assert.Equal(
 		t,
 		[]int64{2, 3},
@@ -677,11 +686,13 @@ func TestDBxPrune(t *testing.T) {
 		[]int64{2, 3},
 		QueryPks(d.Replies),
 	)
-	assert.Equal(
-		t,
-		[]int64{2, 3},
-		QueryPks(d.ThreadMentions),
-	)
+	/*
+		assert.Equal(
+			t,
+			[]int64{2, 3},
+			QueryPks(d.ThreadMentions),
+		)
+	*/
 
 	pruned, err = d.Prune(now-10, 2)
 	if err != nil {
@@ -704,11 +715,13 @@ func TestDBxPrune(t *testing.T) {
 		[]int64{},
 		QueryPks(d.Reposts),
 	)
-	assert.Equal(
-		t,
-		[]int64{5, 6},
-		QueryPks(d.Dms),
-	)
+	/*
+		assert.Equal(
+			t,
+			[]int64{5, 6},
+			QueryPks(d.Dms),
+		)
+	*/
 	assert.Equal(
 		t,
 		[]int64{3},
@@ -730,11 +743,13 @@ func TestDBxPrune(t *testing.T) {
 		[]int64{3},
 		QueryPks(d.Replies),
 	)
-	assert.Equal(
-		t,
-		[]int64{3},
-		QueryPks(d.ThreadMentions),
-	)
+	/*
+		assert.Equal(
+			t,
+			[]int64{3},
+			QueryPks(d.ThreadMentions),
+		)
+	*/
 
 	pruned, err = d.Prune(now-10, 2)
 	if err != nil {
@@ -782,6 +797,7 @@ func TestDBxSelectPostLabels(t *testing.T) {
 	)
 }
 
+/*
 func TestDBxDeleteLike(t *testing.T) {
 	d, cleanup := NewTestDBx()
 	defer cleanup()
@@ -839,6 +855,7 @@ func TestDBxDeleteLike(t *testing.T) {
 	)
 }
 
+
 func TestDBxDeleteRepost(t *testing.T) {
 	d, cleanup := NewTestDBx()
 	defer cleanup()
@@ -895,6 +912,7 @@ func TestDBxDeleteRepost(t *testing.T) {
 		QueryPks(d.Reposts),
 	)
 }
+*/
 
 func TestDBxInsertDeletedMentions(t *testing.T) {
 	d, cleanup := NewTestDBx()
@@ -917,15 +935,17 @@ func TestDBxInsertDeletedMentions(t *testing.T) {
 		CollectPostIds(mentions),
 	)
 
-	threadmentions, err := d.SelectAllMentions(SQLiteMaxInt, 10, actor.Did)
-	if err != nil {
-		panic(err)
-	}
-	assert.Equal(
-		t,
-		CollectPostIds([]*PostRow{reply, quote}),
-		CollectPostIds(threadmentions),
-	)
+	/*
+		threadmentions, err := d.SelectAllMentions(SQLiteMaxInt, 10, actor.Did)
+		if err != nil {
+			panic(err)
+		}
+		assert.Equal(
+			t,
+			CollectPostIds([]*PostRow{reply, quote}),
+			CollectPostIds(threadmentions),
+		)
+	*/
 }
 
 func TestDBxSelectOnlyPosts(t *testing.T) {

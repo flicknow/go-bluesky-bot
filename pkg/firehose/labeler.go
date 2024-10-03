@@ -66,18 +66,21 @@ func (l *LabelerFirehose) Ack(seq int64) {
 }
 
 func (l *LabelerFirehose) proxyStream(sCh <-chan *SubscriberEvent) <-chan *LabelerEvent {
-	lCh := make(chan *LabelerEvent, 1)
+	lCh := make(chan *LabelerEvent, ChannelBuffer)
 
 	lastSeq := l.s.cursor
 	go func() {
-		for sEvt := range sCh {
+		var sEvt *SubscriberEvent
+		var lEvt *LabelerEvent
+		var seq int64
+		for sEvt = range sCh {
 
-			lEvt := l.processSubscriberEvent(sEvt)
+			lEvt = l.processSubscriberEvent(sEvt)
 			if lEvt == nil {
 				continue
 			}
 
-			seq := lEvt.Seq
+			seq = lEvt.Seq
 			if (lastSeq == 0) && (seq != 0) {
 				lastSeq = seq
 			}

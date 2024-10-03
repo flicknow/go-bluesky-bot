@@ -150,24 +150,20 @@ func SortInt64s(unsorted []int64) []int64 {
 }
 
 func ParallelizeFuncs(funcs ...func() error) []error {
-	var errCh = make(chan error, len(funcs))
+	var results = make([]error, len(funcs))
 
 	var wg sync.WaitGroup
-	for _, f := range funcs {
+	for i, f := range funcs {
 		wg.Add(1)
 		go func(g func() error) {
 			defer wg.Done()
-			errCh <- g()
+			results[i] = g()
 		}(f)
 	}
+	wg.Wait()
 
-	go func() {
-		wg.Wait()
-		close(errCh)
-	}()
-
-	var errs = make([]error, 0, 0)
-	for err := range errCh {
+	var errs = make([]error, 0)
+	for _, err := range errs {
 		if err != nil {
 			errs = append(errs, err)
 		}

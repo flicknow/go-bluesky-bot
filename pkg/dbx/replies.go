@@ -19,8 +19,10 @@ type ReplyRow struct {
 }
 
 type DBxTableReplies struct {
-	*sqlx.DB `dbx-table:"replies" dbx-pk:"reply_id"`
-	path     string
+	*sqlx.DB        `dbx-table:"replies" dbx-pk:"reply_id"`
+	path            string
+	NamedStatements map[string]*sqlx.NamedStmt
+	Statements      map[string]*sqlx.Stmt
 }
 
 var ReplySchema = `
@@ -47,7 +49,40 @@ func NewReplyTable(dir string) *DBxTableReplies {
 	return &DBxTableReplies{
 		SQLxMustOpen(path, ReplySchema),
 		path,
+		make(map[string]*sqlx.NamedStmt),
+		make(map[string]*sqlx.Stmt),
 	}
+}
+
+func (d *DBxTableReplies) findOrPrepareNamedStmt(q string) (*sqlx.NamedStmt, error) {
+	stmt := d.NamedStatements[q]
+	if stmt != nil {
+		return stmt, nil
+	}
+
+	var err error
+	stmt, err = d.PrepareNamed(q)
+	if err != nil {
+		return nil, err
+	}
+
+	d.NamedStatements[q] = stmt
+	return stmt, err
+}
+func (d *DBxTableReplies) findOrPrepareStmt(q string) (*sqlx.Stmt, error) {
+	stmt := d.Statements[q]
+	if stmt != nil {
+		return stmt, nil
+	}
+
+	var err error
+	stmt, err = d.Preparex(q)
+	if err != nil {
+		return nil, err
+	}
+
+	d.Statements[q] = stmt
+	return stmt, err
 }
 
 func (d *DBxTableReplies) FindByPostId(postid int64) (*ReplyRow, error) {
@@ -151,7 +186,12 @@ LIMIT
 }
 
 func (d *DBxTableReplies) InsertReply(r *ReplyRow) error {
-	_, err := d.NamedExec("INSERT INTO replies (post_id, actor_id, parent_id, parent_actor_id, root_id, root_actor_id) VALUES (:post_id, :actor_id, :parent_id, :parent_actor_id, :root_id, :root_actor_id)", r)
+	stmt, err := d.findOrPrepareNamedStmt("INSERT INTO replies (post_id, actor_id, parent_id, parent_actor_id, root_id, root_actor_id) VALUES (:post_id, :actor_id, :parent_id, :parent_actor_id, :root_id, :root_actor_id)")
+	if err != nil {
+		return err
+	}
+
+	_, err = stmt.Exec(r)
 	return err
 }
 

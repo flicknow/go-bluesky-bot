@@ -16,8 +16,10 @@ type QuoteRow struct {
 }
 
 type DBxTableQuotes struct {
-	*sqlx.DB `dbx-table:"quotes" dbx-pk:"quote_id"`
-	path     string
+	*sqlx.DB        `dbx-table:"quotes" dbx-pk:"quote_id"`
+	path            string
+	NamedStatements map[string]*sqlx.NamedStmt
+	Statements      map[string]*sqlx.Stmt
 }
 
 var QuoteSchema = `
@@ -42,7 +44,39 @@ func NewQuoteTable(dir string) *DBxTableQuotes {
 	return &DBxTableQuotes{
 		SQLxMustOpen(path, QuoteSchema),
 		path,
+		make(map[string]*sqlx.NamedStmt),
+		make(map[string]*sqlx.Stmt),
 	}
+}
+func (d *DBxTableQuotes) findOrPrepareNamedStmt(q string) (*sqlx.NamedStmt, error) {
+	stmt := d.NamedStatements[q]
+	if stmt != nil {
+		return stmt, nil
+	}
+
+	var err error
+	stmt, err = d.PrepareNamed(q)
+	if err != nil {
+		return nil, err
+	}
+
+	d.NamedStatements[q] = stmt
+	return stmt, err
+}
+func (d *DBxTableQuotes) findOrPrepareStmt(q string) (*sqlx.Stmt, error) {
+	stmt := d.Statements[q]
+	if stmt != nil {
+		return stmt, nil
+	}
+
+	var err error
+	stmt, err = d.Preparex(q)
+	if err != nil {
+		return nil, err
+	}
+
+	d.Statements[q] = stmt
+	return stmt, err
 }
 
 func (d *DBxTableQuotes) FindByPostId(postid int64) (*QuoteRow, error) {
@@ -130,7 +164,12 @@ LIMIT
 }
 
 func (d *DBxTableQuotes) InsertQuote(q *QuoteRow) error {
-	_, err := d.NamedExec("INSERT INTO quotes (post_id, actor_id, subject_id, subject_actor_id) VALUES (:post_id, :actor_id, :subject_id, :subject_actor_id)", q)
+	stmt, err := d.findOrPrepareNamedStmt("INSERT INTO quotes (post_id, actor_id, subject_id, subject_actor_id) VALUES (:post_id, :actor_id, :subject_id, :subject_actor_id)")
+	if err != nil {
+		return err
+	}
+
+	_, err = stmt.Exec(q)
 	return err
 }
 

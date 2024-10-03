@@ -231,13 +231,13 @@ func (s *Server) generateFeed(w http.ResponseWriter, indexer *indexer.Indexer, d
 			if did == "" {
 				return ErrUnauthorized
 			}
-			posts, err = indexer.Db.SelectAllMentions(cursor, limit, did)
+			posts, err = indexer.Db.SelectMentions(cursor, limit, did)
 			vary = "authorization"
 		} else if label == "f-allmentions" {
 			if did == "" {
 				return ErrUnauthorized
 			}
-			posts, err = indexer.Db.SelectAllMentionsFollowed(cursor, limit, did)
+			posts, err = indexer.Db.SelectMentionsFollowed(cursor, limit, did)
 			vary = "authorization"
 		} else if label == "bangers" {
 			posts, err = indexer.Db.SelectBangers(cursor, limit)
@@ -866,15 +866,14 @@ func NewServer(ctx context.Context, indexer *indexer.Indexer) *Server {
 		limit := 25
 		db := s.Indexer.Db
 
-		if cursor == 0 {
-			cursor, err = db.SelectLastCustomLabelId()
-			if err != nil {
-				fmt.Printf("SelectLastCustomLabelId err: %+v\n", err)
-				return
-			}
-			if cursor != 0 {
-				cursor = cursor - 1
-			}
+		lastId, err := db.SelectLastCustomLabelId()
+		if err != nil {
+			fmt.Printf("SelectLastCustomLabelId err: %+v\n", err)
+			return
+		}
+
+		if (cursor == 0) || (cursor > lastId) {
+			cursor = lastId - 1
 		}
 
 		ticker := s.addTicker(30 * time.Second)

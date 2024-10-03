@@ -11,7 +11,6 @@ import (
 	"github.com/flicknow/go-bluesky-bot/pkg/client"
 	"github.com/flicknow/go-bluesky-bot/pkg/clock"
 	"github.com/flicknow/go-bluesky-bot/pkg/dbx"
-	"github.com/flicknow/go-bluesky-bot/pkg/firehose"
 	"github.com/flicknow/go-bluesky-bot/pkg/ticker"
 	"github.com/flicknow/go-bluesky-bot/pkg/utils"
 	"github.com/stretchr/testify/assert"
@@ -254,58 +253,6 @@ func TestInitActorInfoSetsPostCountWhenNoPosts(t *testing.T) {
 	)
 }
 
-func TestLabelerRateLimitForLabels(t *testing.T) {
-	cli := client.NewMockClient(context.Background())
-	clk := clock.NewMockClock()
-	ctx := context.WithValue(context.Background(), "client", cli)
-	ctx = context.WithValue(ctx, "clock", clk)
-
-	d, cleanup := dbx.NewTestDBxContext(ctx)
-	defer cleanup()
-
-	i := NewTestIndexer(ctx, d.DBx)
-	assert.NotNil(t, i)
-
-	actor := d.CreateActor()
-	postsByUri := make(map[string]*firehose.PostRef)
-	for i := 1; i <= 100; i++ {
-		post := dbx.NewTestPostRef(&dbx.TestPostRefInput{Actor: actor.Did})
-		_, err := d.InsertPost(post, actor)
-		if err != nil {
-			panic(err)
-		}
-		postsByUri[post.Ref.Uri] = post
-	}
-	d.Posts.MustExec("UPDATE posts SET labeled = 0")
-
-	getPostsHits := 0
-	cli.MockGetPosts = func(uris []string) ([]bsky.FeedDefs_PostView, error) {
-		getPostsHits++
-		postviews := []bsky.FeedDefs_PostView{}
-		for _, uri := range uris {
-			post := postsByUri[uri]
-			if post == nil {
-				continue
-			}
-
-			postviews = append(postviews, bsky.FeedDefs_PostView{
-				Record: &util.LexiconTypeDecoder{Val: post.Post},
-				Uri:    post.Ref.Uri,
-			})
-		}
-		return postviews, nil
-	}
-
-	clk.SetNow(clk.NowUnix() + 600)
-
-	i.runLabelerOnce(6)
-	assert.Equal(
-		t,
-		2,
-		getPostsHits,
-	)
-}
-
 func TestLabelerRateLimitForActors(t *testing.T) {
 	cli := client.NewMockClient(context.Background())
 	clk := clock.NewMockClock()
@@ -369,9 +316,6 @@ func TestLabelerRateLimitForFollows(t *testing.T) {
 		}
 	}
 
-	d.CreatePost(&dbx.TestPostRefInput{Actor: d.CreateActor().Did})
-	d.Posts.MustExec("UPDATE posts SET labeled = 0")
-
 	getFollowsHits := 0
 	cli.MockGetActors = func(dids []string) ([]*bsky.ActorDefs_ProfileViewDetailed, error) {
 		var zero int64 = 0
@@ -394,7 +338,7 @@ func TestLabelerRateLimitForFollows(t *testing.T) {
 	i.runLabelerOnce(5)
 	assert.Equal(
 		t,
-		2,
+		3,
 		getFollowsHits,
 	)
 }
