@@ -22,13 +22,13 @@ import (
 
 	"github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/events"
-	"github.com/gorilla/websocket"
 	"github.com/flicknow/go-bluesky-bot/pkg/client"
 	"github.com/flicknow/go-bluesky-bot/pkg/cmd"
 	"github.com/flicknow/go-bluesky-bot/pkg/dbx"
 	"github.com/flicknow/go-bluesky-bot/pkg/indexer"
 	"github.com/flicknow/go-bluesky-bot/pkg/ticker"
 	"github.com/flicknow/go-bluesky-bot/pkg/utils"
+	"github.com/gorilla/websocket"
 	cli "github.com/urfave/cli/v2"
 	"golang.org/x/sync/semaphore"
 )
@@ -73,7 +73,7 @@ func (s *Server) stopTickers() {
 	defer s.tickermu.Unlock()
 
 	tickers := s.tickers
-	for t, _ := range tickers {
+	for t := range tickers {
 		t.Stop()
 		delete(tickers, t)
 	}
