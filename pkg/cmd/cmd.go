@@ -165,6 +165,12 @@ var WithIndexer = CombineFlags(
 		EnvVars: []string{"ATP_BGS_HOST"},
 	},
 	&cli.StringFlag{
+		Name:    "jetstream-host",
+		Usage:   "method, hostname, and port of Jetstream instance",
+		Value:   "https://jetstream.atproto.tools",
+		EnvVars: []string{"GO_BLUESKY_JETSTREAM_HOST"},
+	},
+	&cli.StringFlag{
 		Name:    "cursor",
 		Usage:   "path to cursor",
 		Value:   fmt.Sprintf("%s/.bsky.cursor", os.Getenv("HOME")),
