@@ -60,7 +60,8 @@ func loadPartition(path string, src string, min int64, max int64) {
 		CREATE INDEX idx_post_labeled
 			ON posts(labeled, post_id DESC);
 	`)
-	p.MustExec(`ANALYZE`)
+	p.MustExec(`DETACH DATABASE source`)
+	p.MustExec(`ANALYZE posts`)
 
 	p.MustExec("PRAGMA wal_checkpoint(TRUNCATE)")
 }
