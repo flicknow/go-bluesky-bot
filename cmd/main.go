@@ -33,6 +33,7 @@ func main() {
 		blueskybot.LookupCmd,
 		blueskybot.MigrateCmd,
 		blueskybot.MigrateListCmd,
+		blueskybot.PerfCmd,
 		blueskybot.PruneCmd,
 		blueskybot.RequeueCmd,
 		blueskybot.ServerCmd,

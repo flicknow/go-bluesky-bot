@@ -7,10 +7,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/flicknow/go-bluesky-bot/pkg/client"
 	"github.com/flicknow/go-bluesky-bot/pkg/clock"
 	"github.com/flicknow/go-bluesky-bot/pkg/cmd"
-	"github.com/flicknow/go-bluesky-bot/pkg/indexer"
+	"github.com/flicknow/go-bluesky-bot/pkg/dbx"
 	"github.com/flicknow/go-bluesky-bot/pkg/sleeper"
 	cli "github.com/urfave/cli/v2"
 )
@@ -18,8 +17,7 @@ import (
 var PruneCmd = &cli.Command{
 	Name: "prune",
 	Flags: cmd.CombineFlags(
-		cmd.WithClient,
-		cmd.WithIndexer,
+		cmd.WithDb,
 		&cli.IntFlag{
 			Name:  "chunk",
 			Usage: "chunk size",
@@ -47,15 +45,7 @@ var PruneCmd = &cli.Command{
 			shutdown = true
 		}()
 
-		client, err := client.NewClient(cctx)
-		if err != nil {
-			return err
-		}
-
-		indexer, err := indexer.NewIndexer(cmd.ToContext(cctx), client)
-		if err != nil {
-			return err
-		}
+		db := dbx.NewDBx(cmd.ToContext(cctx))
 
 		since := clock.NewClock().NowUnix() - (cctx.Int64("keep-days") * 24 * 60 * 60)
 		chunk := cctx.Int("chunk")
@@ -74,7 +64,7 @@ var PruneCmd = &cli.Command{
 				c = limit - total
 			}
 
-			pruned, err := indexer.Db.Prune(since, c)
+			pruned, err := db.Prune(since, c)
 			if err != nil {
 				return err
 			}

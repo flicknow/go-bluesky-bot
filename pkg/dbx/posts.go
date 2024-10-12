@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jmoiron/sqlx"
 	"github.com/flicknow/go-bluesky-bot/pkg/utils"
+	"github.com/jmoiron/sqlx"
 )
 
 type PostRow struct {
@@ -51,6 +51,10 @@ ON posts(labeled, post_id DESC);
 
 func NewPostTable(dir string) *DBxTablePosts {
 	path := filepath.Join(dir, "posts.db")
+	return NewPostTableWithPath(path)
+}
+
+func NewPostTableWithPath(path string) *DBxTablePosts {
 	table := &DBxTablePosts{
 		SQLxMustOpen(path, PostSchema),
 		path,
