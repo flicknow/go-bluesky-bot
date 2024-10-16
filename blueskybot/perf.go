@@ -85,27 +85,45 @@ var PerfCmd = &cli.Command{
 			Usage: "number of sample rows to load",
 			Value: 100000,
 		},
+		&cli.Float64Flag{
+			Name:  "scale",
+			Usage: "scale the number of rows to load",
+			Value: 0,
+		},
 	),
 	Action: func(cctx *cli.Context) error {
 		args := cctx.Args()
 		count := args.Len()
 
+		scale := cctx.Float64("scale")
 		sample := cctx.String("sample")
 		sampleSize := cctx.Int64("sample-size")
 
 		load := cctx.String("load")
 		if load != "" {
 			src := dbx.NewPostTableWithPath(load)
-			sampleMin := findMin(src)
-			sampleMax := sampleMin + sampleSize
-			loadPartition(sample, load, sampleMin, sampleMax)
-
-			min := sampleMax
+			min := findMin(src)
 			max := findMax(src)
+
+			if sample != "" {
+				sampleMin := min
+				sampleMax := sampleMin + sampleSize
+				min = sampleMax
+				fmt.Printf("> loading %d sample rows\n", sampleMax-sampleMin)
+				loadPartition(sample, load, sampleMin, sampleMax)
+			}
+
 			rows := max - min
+			fmt.Printf("> found %d total rows\n", rows)
 
 			partitionRows := int64(math.Floor((float64(rows) / float64(count))))
+			if scale != 0 {
+				partitionRows = int64(scale * float64(partitionRows))
+				fmt.Printf("> scaling to %d total rows\n", int64(count)*partitionRows)
+			}
+
 			for i, path := range args.Slice() {
+				fmt.Printf("> loading %d rows to %s\n", (min+(int64(i+1)*partitionRows))-(min+(int64(i)*partitionRows)), path)
 				loadPartition(path, load, min+(int64(i)*partitionRows), min+(int64(i+1)*partitionRows))
 			}
 
