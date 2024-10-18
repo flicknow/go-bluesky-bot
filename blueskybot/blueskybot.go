@@ -72,6 +72,9 @@ var BlueskyBot = &cli.Command{
 
 		hose := firehose.NewFirehose(cmd.ToContext(cctx))
 		fCh, err := hose.Start(ctx)
+		if err != nil {
+			return err
+		}
 
 		labeler := firehose.NewLabelerFirehose(cmd.ToContext(cctx))
 		lCh, err := labeler.Start(ctx)
