@@ -12,16 +12,14 @@ import (
 
 var CountSelect = `
 SELECT count(*) FROM custom_labels
-WHERE label_id = ?
-AND created_at > ?
+WHERE created_at > ?
 AND created_at < ?
 ORDER BY custom_label_id ASC
 `
 
 var RequeueSelect = `
 SELECT * FROM custom_labels
-WHERE label_id = ?
-AND created_at > ?
+WHERE created_at > ?
 AND created_at < ?
 ORDER BY custom_label_id ASC
 LIMIT ?
