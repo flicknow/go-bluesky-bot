@@ -249,10 +249,10 @@ func (c *defaultClient) GetAuthorFeed(handle string, filter string, limit int64,
 	defer c.reqmu.Unlock()
 
 	ctx := c.intrcptrContext()
-	feed, err := appbsky.FeedGetAuthorFeed(ctx, c.xrpcc, handle, cursor, filter, limit)
+	feed, err := appbsky.FeedGetAuthorFeed(ctx, c.xrpcc, handle, cursor, filter, false, limit)
 	if err != nil {
 		c.Refresh()
-		feed, err = appbsky.FeedGetAuthorFeed(ctx, c.xrpcc, handle, cursor, filter, limit)
+		feed, err = appbsky.FeedGetAuthorFeed(ctx, c.xrpcc, handle, cursor, filter, false, limit)
 	}
 	if err != nil {
 		res := intrcptrRes(ctx)
