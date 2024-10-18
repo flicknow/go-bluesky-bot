@@ -22,7 +22,7 @@ test:
 	go test $(shell test $(DEBUG) -ne 0 && echo -tags sqlite_trace) -v ./pkg/...
 
 update:
-	go get -u && go mod tidy
+	go get -u ./... && go mod tidy
 
 $(BUILD)/$(EXE): $(GOFILES) go.*
 	go build $(shell test $(DEBUG) -ne 0 && echo -tags sqlite_trace) -o $(BUILD)/$(EXE) ./cmd/...

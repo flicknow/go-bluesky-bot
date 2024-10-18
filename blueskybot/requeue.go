@@ -10,19 +10,38 @@ import (
 	cli "github.com/urfave/cli/v2"
 )
 
+var CountSelect = `
+SELECT count(*) FROM custom_labels
+WHERE label_id = ?
+AND created_at > ?
+AND created_at < ?
+ORDER BY custom_label_id ASC
+`
+
 var RequeueSelect = `
 SELECT * FROM custom_labels
 WHERE label_id = ?
 AND created_at > ?
 AND created_at < ?
-AND neg = 1
 ORDER BY custom_label_id ASC
 LIMIT ?
 `
 
 var RequeueCmd = &cli.Command{
-	Name:  "requeue",
-	Flags: cmd.WithDb,
+	Name: "requeue",
+	Flags: cmd.CombineFlags(
+		cmd.WithDb,
+		&cli.DurationFlag{
+			Name:  "since",
+			Usage: "time period since to requeue",
+			Value: 24 * time.Hour,
+		},
+		&cli.BoolFlag{
+			Name:  "dry-run",
+			Usage: "do not requeue labels",
+			Value: false,
+		},
+	),
 	Action: func(cctx *cli.Context) error {
 		d := dbx.NewDBx(cmd.ToContext(cctx))
 		bday, err := d.Labels.FindOrCreateLabel("birthday")
@@ -30,9 +49,23 @@ var RequeueCmd = &cli.Command{
 			return err
 		}
 
+		dryrun := cctx.Bool("dry-run")
+		since := cctx.Duration("since")
+
 		now := time.Now()
-		start := now.Add(-1 * 24 * time.Hour).Unix()
+		start := now.Add(-1 * since).Unix()
 		end := now.Add(-1 * time.Minute).Unix()
+
+		if dryrun {
+			var count int64 = 0
+			row := d.CustomLabels.QueryRow(CountSelect, bday.LabelId, start, end)
+			err := row.Scan(&count)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("> would have requeued %d labels\n", count)
+			return nil
+		}
 
 		count := 0
 		chunk := 100
