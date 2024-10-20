@@ -46,6 +46,33 @@ func TestDBxInsertReply(t *testing.T) {
 	assert.True(t, errors.Is(err, sql.ErrNoRows))
 }
 
+func TestDBxInsertIgnorePinReply(t *testing.T) {
+	d, cleanup := NewTestDBx()
+	defer cleanup()
+
+	skytan, err := d.Actors.FindOrCreateActor(SKYTAN)
+	if err != nil {
+		panic(err)
+	}
+	op := d.CreatePost(&TestPostRefInput{Actor: skytan.Did})
+
+	replyGuy := d.CreateActor()
+	reply := d.CreatePost(&TestPostRefInput{Actor: replyGuy.Did, Reply: op.Uri, Text: "test"})
+	d.CreatePost(&TestPostRefInput{Actor: replyGuy.Did, Reply: op.Uri, Text: "📌"})
+
+	opMentions, err := d.SelectMentions(SQLiteMaxInt, 10, skytan.Did)
+	if err != nil {
+		panic(err)
+	}
+	assert.Equal(
+		t,
+		[]*PostRow{reply},
+		opMentions,
+		"sky-tan mentions ignore pin reply",
+	)
+
+}
+
 func TestDBxInsertQuote(t *testing.T) {
 	d, cleanup := NewTestDBx()
 	defer cleanup()

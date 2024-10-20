@@ -16,12 +16,12 @@ import (
 
 	"github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/atproto/crypto"
-	"github.com/jmoiron/sqlx"
 	"github.com/flicknow/go-bluesky-bot/pkg/clock"
 	"github.com/flicknow/go-bluesky-bot/pkg/cmd"
 	"github.com/flicknow/go-bluesky-bot/pkg/firehose"
 	"github.com/flicknow/go-bluesky-bot/pkg/metrics"
 	"github.com/flicknow/go-bluesky-bot/pkg/utils"
+	"github.com/jmoiron/sqlx"
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
@@ -34,6 +34,7 @@ var LabelerDid = "did:plc:jcce2sa3fgue4wiocvf7e7xj"
 var AMELIA_BUT_ALSO_ITS_REM = "did:plc:6gwchzxwoj7jms5nilauupxq"
 var MARK = "did:plc:wzsilnxf24ehtmmc3gssy5bu"
 var REM = "did:plc:asb3rgscdkkv636buq6blof6"
+var SKYTAN = "did:plc:ikvaup2d6nlir7xfm5vgzvra"
 var ʕ٠ᴥ٠ʔ = "did:plc:nhvvwh2qglcmsbvba7durp7f"
 var SQLiteMaxInt int64 = 9223372036854775807
 var PinnedFollowPostUrl = "at://did:plc:wzsilnxf24ehtmmc3gssy5bu/app.bsky.feed.post/3kexw5q5mix22"
@@ -391,9 +392,13 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 		}
 	}
 
+	parentDid := ""
 	parentUri := ""
+	ignorePinReply := false
 	if (post.Reply != nil) && (post.Reply.Parent != nil) {
 		parentUri = post.Reply.Parent.Uri
+		parentDid = utils.ParseDid(parentUri)
+		ignorePinReply = (post.Text == "📌") && (parentDid == SKYTAN)
 	}
 
 	deferredPostid := NewDeferredInt64()
@@ -491,6 +496,10 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 			}
 
 			//defer func() { metric.InsertReply.Val = clock.NowUnixMilli() - startMethod }()
+
+			if ignorePinReply {
+				return nil
+			}
 
 			if parentUri == "" {
 				return nil
