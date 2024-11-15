@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ericvolp12/jetstream/pkg/models"
+	"github.com/bluesky-social/jetstream/pkg/models"
 	"github.com/flicknow/go-bluesky-bot/pkg/utils"
 	"github.com/gorilla/websocket"
 )

@@ -318,8 +318,8 @@ func (f *Firehose) processJetstreamEventEvent(jEvt *JetstreamEvent) *FirehoseEve
 	}
 
 	body := jEvt.Body
-	switch body.EventType {
-	case "com", "commit":
+	switch body.Kind {
+	case "commit":
 	default:
 		return nil
 	}
@@ -332,8 +332,8 @@ func (f *Firehose) processJetstreamEventEvent(jEvt *JetstreamEvent) *FirehoseEve
 		return nil
 	}
 
-	switch commit.OpType {
-	case "c", "create":
+	switch commit.Operation {
+	case "create":
 		uri := fmt.Sprintf("at://%s/%s/%s", body.Did, commit.Collection, commit.RKey)
 		ref := &comatproto.RepoStrongRef{
 			Cid: commit.CID,
@@ -364,7 +364,7 @@ func (f *Firehose) processJetstreamEventEvent(jEvt *JetstreamEvent) *FirehoseEve
 		case "app.bsky.actor.profile":
 			return &FirehoseEvent{Seq: seq, Profile: body.Did, Type: EvtKindFirehoseProfile}
 		}
-	case "d", "delete":
+	case "delete":
 		return &FirehoseEvent{Delete: fmt.Sprintf("at://%s/%s/%s", body.Did, commit.Collection, commit.RKey), Type: EvtKindFirehoseDelete}
 	}
 
