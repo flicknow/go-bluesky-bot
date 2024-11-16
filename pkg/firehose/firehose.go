@@ -265,7 +265,7 @@ func (f *Firehose) proxyStream(sCh <-chan *JetstreamEvent) <-chan *FirehoseEvent
 				lastSeq = lEvt.Seq
 			}
 
-			if (seq != 0) && ((seq - lastSeq) > 2_000_000) {
+			if (seq != 0) && ((seq - lastSeq) > 300_000_000) {
 				err := fmt.Errorf("%w: skipped too many seqs: went from %d to %d (%d)", ErrFatal, lastSeq, seq, seq-lastSeq)
 				lEvt = &FirehoseEvent{Error: err, Type: EvtKindError}
 			}
