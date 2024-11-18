@@ -111,3 +111,16 @@ func (d *DBxTableLabels) FindOrCreateLabel(name string) (*LabelRow, error) {
 
 	return d.FindLabel(name)
 }
+
+func (d *DBxTableLabels) SelectNewskieLabels() ([]*LabelRow, error) {
+	labels := make([]*LabelRow, 0)
+	err := d.Select(
+		&labels,
+		`SELECT * FROM labels WHERE name LIKE "newskie-%" ORDER BY name ASC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return labels, nil
+}

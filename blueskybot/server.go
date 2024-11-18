@@ -22,13 +22,13 @@ import (
 
 	"github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/events"
-	"github.com/gorilla/websocket"
 	"github.com/flicknow/go-bluesky-bot/pkg/client"
 	"github.com/flicknow/go-bluesky-bot/pkg/cmd"
 	"github.com/flicknow/go-bluesky-bot/pkg/dbx"
 	"github.com/flicknow/go-bluesky-bot/pkg/indexer"
 	"github.com/flicknow/go-bluesky-bot/pkg/ticker"
 	"github.com/flicknow/go-bluesky-bot/pkg/utils"
+	"github.com/gorilla/websocket"
 	cli "github.com/urfave/cli/v2"
 	"golang.org/x/sync/semaphore"
 )
@@ -971,6 +971,17 @@ func NewServer(ctx context.Context, indexer *indexer.Indexer) *Server {
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/renewskies"},
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/f-renewskies"},
 			{Uri: "at://did:web:flicknow.xyz/app.bsky.feed.generator/rude"},
+		}
+
+		newskies, err := s.Indexer.Db.Labels.SelectNewskieLabels()
+		if err != nil {
+			log.Printf("%+v\n", err)
+			ISE(w)
+			return
+		}
+		for _, newskie := range newskies {
+			uri := fmt.Sprintf("at://did:web:flicknow.xyz/app.bsky.feed.generator/%s", newskie.Name)
+			response.Feeds = append(response.Feeds, describeFeedGeneratorFeed{Uri: uri})
 		}
 
 		b, err := json.Marshal(response)

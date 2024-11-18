@@ -889,6 +889,18 @@ func (i *Indexer) InitActorInfo(actorrow *dbx.ActorRow, profile *bsky.ActorDefs_
 			if (newskieRow != nil) && (newskieRow.LabelId != 0) {
 				postlabel := &dbx.PostLabelRow{PostId: firstPostId, LabelId: newskieRow.LabelId}
 				postlabels = append(postlabels, postlabel)
+
+				record, ok := firstPost.Post.Record.Val.(*bsky.FeedPost)
+				if ok {
+					for _, lang := range record.Langs {
+						label, err := db.Labels.FindOrCreateLabel(fmt.Sprintf("newskie-%s", lang))
+						if err != nil {
+							return hits, err
+						}
+
+						postlabels = append(postlabels, &dbx.PostLabelRow{PostId: firstPostId, LabelId: label.LabelId})
+					}
+				}
 			}
 		}
 	}
@@ -966,7 +978,12 @@ func (i *Indexer) Post(postRef *firehose.PostRef) (*dbx.PostRow, error) {
 	if !actor.Blocked && (actor.CreatedAt != 0) && ((postRef.Post.Reply == nil) || (postRef.Post.Reply.Parent == nil)) {
 		if actor.Posts == 0 {
 			labels = append(labels, "newskie")
+
+			for _, lang := range postRef.Post.Langs {
+				labels = append(labels, fmt.Sprintf("newskie-%s", lang))
+			}
 		}
+
 		if (actor.LastPost > 0) && (actor.LastPost <= (i.clock.NowUnix() - (14 * 24 * 60 * 60))) {
 			labels = append(labels, "renewskie")
 		}
