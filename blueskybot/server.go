@@ -36,6 +36,24 @@ import (
 var upgrader = websocket.Upgrader{}
 var ErrUnauthorized = fmt.Errorf("ERROR: UNAUTHORIZED")
 var LabelerDid = "did:plc:jcce2sa3fgue4wiocvf7e7xj"
+var ExpandedLabels = map[string][]string{
+	"newskie-de":    {"newskie-de", "newskie-de-DE"},
+	"newskie-de-DE": {"newskie-de", "newskie-de-DE"},
+	"newskie-en":    {"newskie-en", "newskie-en-CA", "newskie-en-GB", "newskie-en-KH", "newskie-en-US"},
+	"newskie-es":    {"newskie-es", "newskie-es-ES"},
+	"newskie-es-ES": {"newskie-es", "newskie-es-ES"},
+	"newskie-ja":    {"newskie-ja", "newskie-ja-JP"},
+	"newskie-ja-JP": {"newskie-ja", "newskie-ja-JP"},
+	"newskie-ko":    {"newskie-ko", "newskie-ko-KR"},
+	"newskie-ko-KR": {"newskie-ko", "newskie-ko-KR"},
+	"newskie-km":    {"newskie-km", "newskie-en-KH"},
+	"newskie-en-KH": {"newskie-km", "newskie-en-KH"},
+	"newskie-nn":    {"newskie-nb", "newskie-nn", "newskie-no"},
+	"newskie-no":    {"newskie-nb", "newskie-nn", "newskie-no"},
+	"newskie-nb":    {"newskie-nb", "newskie-nn", "newskie-no"},
+	"newskie-tl":    {"newskie-fil", "newskie-tl"},
+	"newskie-fil":   {"newskie-fil", "newskie-tl"},
+}
 
 type Server struct {
 	Indexer               *indexer.Indexer
@@ -284,7 +302,12 @@ func (s *Server) generateFeed(w http.ResponseWriter, indexer *indexer.Indexer, d
 			posts, err = indexer.Db.SelectPostsByLabelsFollowed(cursor, limit, did, label[2:])
 			vary = "authorization"
 		} else {
-			posts, err = indexer.Db.SelectPostsByLabels(cursor, limit, label)
+			expanded, ok := ExpandedLabels[label]
+			if ok {
+				posts, err = indexer.Db.SelectPostsByLabels(cursor, limit, expanded...)
+			} else {
+				posts, err = indexer.Db.SelectPostsByLabels(cursor, limit, label)
+			}
 		}
 
 		return err
