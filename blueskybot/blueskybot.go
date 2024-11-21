@@ -233,6 +233,7 @@ var BlueskyBot = &cli.Command{
 						return nil
 					})()
 					if err != nil {
+						fmt.Printf("> ERROR INDEXING SEQ %d POST %s: %+v\n", fEvt.Seq, fEvt.Post.Ref.Uri, err)
 						continue
 					}
 				case firehose.EvtKindFirehoseRepost:
