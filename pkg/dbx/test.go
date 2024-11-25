@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"reflect"
 	"sort"
+	"time"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/atproto/crypto"
@@ -122,7 +123,7 @@ type TestPostInput struct {
 
 func NewTestPostRef(input *TestPostRefInput) *firehose.PostRef {
 	ref := &atproto.RepoStrongRef{Uri: input.Uri}
-	post := &bsky.FeedPost{Reply: nil, Text: input.Text}
+	post := &bsky.FeedPost{CreatedAt: time.Now().UTC().Format(time.RFC3339), Reply: nil, Text: input.Text}
 	if (input.Actor != "") && (input.Uri == "") {
 		ref.Uri = NewTestPostUri(input.Actor)
 	}

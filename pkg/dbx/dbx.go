@@ -386,6 +386,18 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 	uri := postRef.Ref.Uri
 	now := d.clock.NowUnix()
 
+	createdAt := postRef.Post.CreatedAt
+	if createdAt == "" {
+		return nil, fmt.Errorf("post %s has no createdAt", uri)
+	}
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return nil, err
+	}
+	if t.UTC().Unix() < (now - 604800) {
+		return nil, nil
+	}
+
 	if (post.Labels != nil) && (post.Labels.LabelDefs_SelfLabels != nil) {
 		for _, selfLabel := range post.Labels.LabelDefs_SelfLabels.Values {
 			labels = append(labels, selfLabel.Val)
