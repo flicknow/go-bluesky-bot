@@ -90,7 +90,7 @@ func (s *Server) stopTickers() {
 	defer s.tickermu.Unlock()
 
 	tickers := s.tickers
-	for t, _ := range tickers {
+	for t := range tickers {
 		t.Stop()
 		delete(tickers, t)
 	}
