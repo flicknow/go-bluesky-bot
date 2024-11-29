@@ -399,6 +399,11 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 					//log.Printf("%+v\n", e)
 					continue
 				}
+				if op.Cid == nil {
+					log.Printf("WARNING skipping op with no cid: %+v\n", op)
+					continue
+				}
+
 				if lexutil.LexLink(rc) != *op.Cid {
 					err := fmt.Errorf("mismatch in record and op cid: %s != %s", rc, *op.Cid)
 					return &FirehoseEvent{Error: err, Type: EvtKindError}
