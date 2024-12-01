@@ -254,35 +254,39 @@ func (f *Firehose) proxyStream(sCh <-chan *SubscriberEvent) <-chan *FirehoseEven
 	fCh := make(chan *FirehoseEvent, ChannelBuffer)
 
 	var sEvt *SubscriberEvent
-	var lEvt *FirehoseEvent
+	var lEvts []*FirehoseEvent
 	var seq int64
 	lastSeq := f.s.cursor
 	go func() {
+	EVENT:
 		for sEvt = range sCh {
-			lEvt = f.processSubscriberEvent(sEvt)
-			if lEvt == nil {
+			lEvts = f.processSubscriberEvent(sEvt)
+			if (lEvts == nil) || (len(lEvts) == 0) {
 				continue
 			}
 
-			seq = lEvt.Seq
-			if (lastSeq == 0) && (lEvt.Seq != 0) {
-				lastSeq = lEvt.Seq
+			seq = lEvts[0].Seq
+			if (lastSeq == 0) && (lEvts[0].Seq != 0) {
+				lastSeq = lEvts[0].Seq
 			}
 
 			if (seq != 0) && ((seq - lastSeq) > 1000) {
 				err := fmt.Errorf("%w: skipped too many seqs: went from %d to %d (%d)", ErrFatal, lastSeq, seq, seq-lastSeq)
-				lEvt = &FirehoseEvent{Error: err, Type: EvtKindError}
+				lEvts = []*FirehoseEvent{&FirehoseEvent{Error: err, Type: EvtKindError}}
 			}
 
-			fCh <- lEvt
+			for _, lEvt := range lEvts {
+				fCh <- lEvt
+
+				if (lEvt.Error != nil) && (errors.Is(lEvt.Error, ErrFatal)) {
+					break EVENT
+				}
+			}
 
 			if seq != 0 {
 				lastSeq = seq
 			}
 
-			if (lEvt.Error != nil) && (errors.Is(lEvt.Error, ErrFatal)) {
-				break
-			}
 		}
 
 		close(fCh)
@@ -316,53 +320,53 @@ func (f *Firehose) Restart(ctx context.Context) (<-chan *FirehoseEvent, error) {
 
 var CommitEvt comatproto.SyncSubscribeRepos_Commit
 
-func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent {
+func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) []*FirehoseEvent {
 	if sEvt.Error != nil {
-		return &FirehoseEvent{Error: sEvt.Error, Type: EvtKindError}
+		return []*FirehoseEvent{&FirehoseEvent{Error: sEvt.Error, Type: EvtKindError}}
 	}
 
 	header := sEvt.Header
 	if header.Op != events.EvtKindMessage {
 		err := fmt.Errorf("unexpected header op: %d", header.Op)
-		return &FirehoseEvent{Error: err, Type: EvtKindError}
+		return []*FirehoseEvent{&FirehoseEvent{Error: err, Type: EvtKindError}}
 	}
 
 	switch header.MsgType {
 	case "#handle":
 		var evt comatproto.SyncSubscribeRepos_Handle
 		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
-			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #handle: %w", err), Type: EvtKindError}
+			return []*FirehoseEvent{&FirehoseEvent{Error: fmt.Errorf("error unmarshalling #handle: %w", err), Type: EvtKindError}}
 		}
-		return &FirehoseEvent{Seq: evt.Seq, Type: header.MsgType}
+		return []*FirehoseEvent{&FirehoseEvent{Seq: evt.Seq, Type: header.MsgType}}
 	case "#identity":
 		var evt comatproto.SyncSubscribeRepos_Identity
 		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
-			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #identity: %w", err), Type: EvtKindError}
+			return []*FirehoseEvent{&FirehoseEvent{Error: fmt.Errorf("error unmarshalling #identity: %w", err), Type: EvtKindError}}
 		}
-		return &FirehoseEvent{Seq: evt.Seq, Type: header.MsgType}
+		return []*FirehoseEvent{&FirehoseEvent{Seq: evt.Seq, Type: header.MsgType}}
 	case "#info":
 		var evt comatproto.SyncSubscribeRepos_Info
 		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
-			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #info: %w", err), Type: EvtKindError}
+			return []*FirehoseEvent{&FirehoseEvent{Error: fmt.Errorf("error unmarshalling #info: %w", err), Type: EvtKindError}}
 		}
-		return &FirehoseEvent{Info: &evt, Type: header.MsgType}
+		return []*FirehoseEvent{&FirehoseEvent{Info: &evt, Type: header.MsgType}}
 	case "#migrate":
 		var evt comatproto.SyncSubscribeRepos_Migrate
 		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
-			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #migrate: %w", err), Type: EvtKindError}
+			return []*FirehoseEvent{&FirehoseEvent{Error: fmt.Errorf("error unmarshalling #migrate: %w", err), Type: EvtKindError}}
 		}
-		return &FirehoseEvent{Seq: evt.Seq, Type: header.MsgType}
+		return []*FirehoseEvent{&FirehoseEvent{Seq: evt.Seq, Type: header.MsgType}}
 	case "#tombstone":
 		var evt comatproto.SyncSubscribeRepos_Tombstone
 		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
-			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #tombstone: %w", err), Type: EvtKindError}
+			return []*FirehoseEvent{&FirehoseEvent{Error: fmt.Errorf("error unmarshalling #tombstone: %w", err), Type: EvtKindError}}
 		}
-		return &FirehoseEvent{Tombstone: evt.Did, Seq: evt.Seq, Type: header.MsgType}
+		return []*FirehoseEvent{&FirehoseEvent{Tombstone: evt.Did, Seq: evt.Seq, Type: header.MsgType}}
 	case "#commit":
 		ctx := f.s.conCtx
 
 		if err := CommitEvt.UnmarshalCBOR(sEvt.Body); err != nil {
-			return &FirehoseEvent{Error: fmt.Errorf("error unmarshalling #commit: %w", err), Type: EvtKindError}
+			return []*FirehoseEvent{&FirehoseEvent{Error: fmt.Errorf("error unmarshalling #commit: %w", err), Type: EvtKindError}}
 		}
 
 		if CommitEvt.TooBig {
@@ -372,8 +376,10 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 		r, err := repo.ReadRepoFromCar(ctx, bytes.NewReader(CommitEvt.Blocks))
 		if err != nil {
 			err = fmt.Errorf("reading repo from car (seq: %d, len: %d): %w", CommitEvt.Seq, len(CommitEvt.Blocks), err)
-			return &FirehoseEvent{Error: err, Type: EvtKindError}
+			return []*FirehoseEvent{&FirehoseEvent{Error: err, Type: EvtKindError}}
 		}
+
+		cEvts := make([]*FirehoseEvent, 0)
 		for _, op := range CommitEvt.Ops {
 			path := op.Path
 			parts := strings.SplitN(path, "/", 2)
@@ -406,7 +412,8 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 
 				if lexutil.LexLink(rc) != *op.Cid {
 					err := fmt.Errorf("mismatch in record and op cid: %s != %s", rc, *op.Cid)
-					return &FirehoseEvent{Error: err, Type: EvtKindError}
+					cEvts = append(cEvts, &FirehoseEvent{Error: err, Type: EvtKindError})
+					continue
 				}
 				ref := &comatproto.RepoStrongRef{Cid: rc.String(), Uri: uri}
 				switch lextype {
@@ -418,10 +425,10 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 						err = utils.DecodeCBOR(rec, &like)
 						if err != nil {
 							log.Printf("error decoding %s: %+v", uri, err)
-							return nil
+							continue
 						}
 					}
-					return &FirehoseEvent{Seq: CommitEvt.Seq, Like: &LikeRef{like, ref, CommitEvt.Seq}, Type: EvtKindFirehoseLike}
+					cEvts = append(cEvts, &FirehoseEvent{Seq: CommitEvt.Seq, Like: &LikeRef{like, ref, CommitEvt.Seq}, Type: EvtKindFirehoseLike})
 				case "app.bsky.feed.post":
 					post := &appbsky.FeedPost{}
 					if r, ok := rec.(*appbsky.FeedPost); ok {
@@ -430,10 +437,10 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 						err = utils.DecodeCBOR(rec, &post)
 						if err != nil {
 							log.Printf("error decoding %s: %+v", uri, err)
-							return nil
+							continue
 						}
 					}
-					return &FirehoseEvent{Seq: CommitEvt.Seq, Post: NewPostRef(post, ref, CommitEvt.Seq), Type: EvtKindFirehosePost}
+					cEvts = append(cEvts, &FirehoseEvent{Seq: CommitEvt.Seq, Post: NewPostRef(post, ref, CommitEvt.Seq), Type: EvtKindFirehosePost})
 					/*
 						case "app.bsky.feed.repost":
 							repost := &appbsky.FeedRepost{}
@@ -450,7 +457,7 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 					*/
 				case "app.bsky.actor.profile":
 					if ek == repomgr.EvtKindCreateRecord {
-						return &FirehoseEvent{Seq: CommitEvt.Seq, Profile: CommitEvt.Repo, Type: EvtKindFirehoseProfile}
+						cEvts = append(cEvts, &FirehoseEvent{Seq: CommitEvt.Seq, Profile: CommitEvt.Repo, Type: EvtKindFirehoseProfile})
 					}
 				case "app.bsky.graph.block":
 					block := &appbsky.GraphBlock{}
@@ -460,10 +467,10 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 						err = utils.DecodeCBOR(rec, &block)
 						if err != nil {
 							log.Printf("error decoding %s: %+v", uri, err)
-							return nil
+							continue
 						}
 					}
-					return &FirehoseEvent{Seq: CommitEvt.Seq, Block: &BlockRef{block.Subject, ref, CommitEvt.Seq}, Type: EvtKindFirehoseBlock}
+					cEvts = append(cEvts, &FirehoseEvent{Seq: CommitEvt.Seq, Block: &BlockRef{block.Subject, ref, CommitEvt.Seq}, Type: EvtKindFirehoseBlock})
 					/*
 						case "app.bsky.graph.follow":
 							follow := &appbsky.GraphFollow{}
@@ -480,10 +487,11 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) *FirehoseEvent 
 					*/
 				}
 			case repomgr.EvtKindDeleteRecord:
-				return &FirehoseEvent{Seq: CommitEvt.Seq, Delete: uri, Type: EvtKindFirehoseDelete}
+				cEvts = append(cEvts, &FirehoseEvent{Seq: CommitEvt.Seq, Delete: uri, Type: EvtKindFirehoseDelete})
 			}
 		}
 
+		return cEvts
 	}
 
 	return nil
