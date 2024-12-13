@@ -30,6 +30,7 @@ func main() {
 		blueskybot.IndexBirthdaysCmd,
 		blueskybot.IndexCmd,
 		blueskybot.IndexFollowsCmd,
+		blueskybot.LabelCmd,
 		blueskybot.LookupCmd,
 		blueskybot.MigrateCmd,
 		blueskybot.MigrateListCmd,
