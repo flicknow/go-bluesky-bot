@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -21,12 +22,13 @@ import (
 )
 
 type Jetstream struct {
-	addr         string
-	con          *websocket.Conn
-	conCtx       context.Context
-	conCtxCancel context.CancelFunc
-	cursor       int64
-	cursorPath   string
+	addr              string
+	con               *websocket.Conn
+	conCtx            context.Context
+	conCtxCancel      context.CancelFunc
+	cursor            int64
+	cursorPath        string
+	wantedCollections []string
 }
 
 type JetstreamEvent struct {
@@ -36,9 +38,15 @@ type JetstreamEvent struct {
 
 func NewJetstream(addr string, cursorPath string) *Jetstream {
 	return &Jetstream{
-		addr:       addr,
-		cursorPath: cursorPath,
+		addr:              addr,
+		cursorPath:        cursorPath,
+		wantedCollections: []string{},
 	}
+}
+
+func (s *Jetstream) WithWantedCollections(collections ...string) *Jetstream {
+	s.wantedCollections = collections
+	return s
 }
 
 func (s *Jetstream) Ack(seq int64) {
@@ -144,14 +152,20 @@ func (s *Jetstream) Restart(ctx context.Context) (<-chan *JetstreamEvent, error)
 }
 
 func (s *Jetstream) startStream(ctx context.Context, ch chan *JetstreamEvent) (*websocket.Conn, error) {
-	addr := fmt.Sprintf("%s?wantedCollections=app.bsky.feed.post&wantedCollections=app.bsky.feed.like", s.addr)
-
 	c := s.cursor
-	d := websocket.DefaultDialer
+
+	query := url.Values{}
 	if c != 0 {
-		addr = fmt.Sprintf("%s&cursor=%d", addr, c-(5_000_000))
+		query.Add("cursor", strconv.FormatInt(c-(5_000_000), 10))
+	}
+	for _, wantedCollection := range s.wantedCollections {
+		query.Add("wantedCollections", wantedCollection)
+
 	}
 
+	addr := fmt.Sprintf("%s?%s", s.addr, query.Encode())
+
+	d := websocket.DefaultDialer
 	con, _, err := d.Dial(addr, http.Header{})
 	if err != nil {
 		return nil, err
