@@ -926,8 +926,15 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 	)
 	if len(errs) > 0 {
 		msg := fmt.Sprintf("Error indexing post %s:", uri)
+		bindErr := false
 		for _, e := range errs {
+			if strings.Contains(e.Error(), "could not find name") {
+				bindErr = true
+			}
 			msg = fmt.Sprintf("%s\n%s", msg, e)
+		}
+		if bindErr {
+			panic(msg)
 		}
 		log.Print(msg)
 		return nil, errors.New(msg)
