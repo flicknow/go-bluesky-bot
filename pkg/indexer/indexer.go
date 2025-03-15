@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -481,19 +482,31 @@ func (i *Indexer) runCustomLabelerOnce() {
 		},
 		func() error {
 			clock := i.clock
-			err := i.Db.RecordBirthdayLabels(clock)
+			clock.NowString()
+
+			year, err := strconv.ParseInt(clock.NowString()[:4], 10, 64)
 			if err != nil {
 				return err
 			}
 
-			err = i.Db.RecordUnbirthdayLabels(clock)
-			if err != nil {
-				return err
+			yearsSince := int(year - 2023)
+			for yearsSince > 0 {
+				err := i.Db.RecordBirthdayLabels(clock, yearsSince)
+				if err != nil {
+					return err
+				}
+
+				err = i.Db.RecordUnbirthdayLabels(clock, yearsSince)
+				if err != nil {
+					return err
+				}
+
+				yearsSince--
 			}
 
 			err = i.Db.PruneCustomLabels(clock)
 
-			return nil
+			return err
 		},
 	)
 	if len(errs) > 0 {

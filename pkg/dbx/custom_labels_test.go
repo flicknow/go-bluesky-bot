@@ -45,7 +45,7 @@ func TestDBxRecordBirthdayLabels(t *testing.T) {
 		panic(err)
 	}
 
-	err = d.RecordBirthdayLabels(clock)
+	err = d.RecordBirthdayLabels(clock, 1)
 	if err != nil {
 		panic(err)
 	}
@@ -57,7 +57,7 @@ func TestDBxRecordBirthdayLabels(t *testing.T) {
 	)
 
 	clock.SetNow(now.Unix() + 600)
-	err = d.RecordBirthdayLabels(clock)
+	err = d.RecordBirthdayLabels(clock, 1)
 	if err != nil {
 		panic(err)
 	}
@@ -91,7 +91,7 @@ func TestDBxRecordUnbirthdayLabels(t *testing.T) {
 		panic(err)
 	}
 
-	err = d.RecordUnbirthdayLabels(clock)
+	err = d.RecordUnbirthdayLabels(clock, 1)
 	if err != nil {
 		panic(err)
 	}
@@ -103,7 +103,7 @@ func TestDBxRecordUnbirthdayLabels(t *testing.T) {
 	)
 
 	clock.SetNow(now.Unix() + 600)
-	err = d.RecordUnbirthdayLabels(clock)
+	err = d.RecordUnbirthdayLabels(clock, 1)
 	if err != nil {
 		panic(err)
 	}
@@ -200,7 +200,7 @@ func TestDBxSelectBirthdays(t *testing.T) {
 		panic(err)
 	}
 
-	err = d.RecordBirthdayLabels(clock)
+	err = d.RecordBirthdayLabels(clock, 1)
 	if err != nil {
 		panic(err)
 	}
@@ -251,7 +251,7 @@ func TestDBxSelectBirthdaysFollowed(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	err = d.RecordBirthdayLabels(clock)
+	err = d.RecordBirthdayLabels(clock, 1)
 	if err != nil {
 		panic(err)
 	}

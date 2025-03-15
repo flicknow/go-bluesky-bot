@@ -2794,9 +2794,9 @@ func (d *DBx) SelectPostLabels(since int64, limit int) ([]*LabelDef, error) {
 
 	return labelDefs, nil
 }
-func (d *DBx) RecordBirthdayLabels(t clock.Clock) error {
+func (d *DBx) RecordBirthdayLabels(t clock.Clock, yearsAgo int) error {
 	now := time.Unix(t.NowUnix(), 0)
-	endWindow := now.AddDate(-1, 0, 0)
+	endWindow := now.AddDate(-1*yearsAgo, 0, 0)
 	startWindow := endWindow.Add(-10 * time.Minute)
 
 	actors, err := d.Actors.SelectActorsWithirthdaysBetween(startWindow.Unix(), endWindow.Unix())
@@ -2851,9 +2851,9 @@ func (d *DBx) RecordBirthdayLabels(t clock.Clock) error {
 	return d.CustomLabels.InsertLabels(labels)
 }
 
-func (d *DBx) RecordUnbirthdayLabels(t clock.Clock) error {
+func (d *DBx) RecordUnbirthdayLabels(t clock.Clock, yearsAgo int) error {
 	now := time.Unix(t.NowUnix(), 0)
-	endWindow := now.AddDate(-1, 0, -1)
+	endWindow := now.AddDate(-1*yearsAgo, 0, -1)
 	startWindow := endWindow.Add(-10 * time.Minute)
 
 	actors, err := d.Actors.SelectActorsWithirthdaysBetween(startWindow.Unix(), endWindow.Unix())
