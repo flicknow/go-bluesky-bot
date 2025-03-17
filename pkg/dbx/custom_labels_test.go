@@ -120,34 +120,6 @@ func TestDBxRecordUnbirthdayLabels(t *testing.T) {
 	)
 }
 
-func TestDBxTestOllieBangerCustomLabels(t *testing.T) {
-	d, cleanup := NewTestDBx()
-	defer cleanup()
-
-	actor := d.CreateActor()
-	ollie, err := d.Actors.FindOrCreateActor(ʕ٠ᴥ٠ʔ)
-	if err != nil {
-		panic(err)
-	}
-
-	post := d.CreatePost(&TestPostRefInput{Actor: actor.Did})
-	reply := d.CreatePost(&TestPostRefInput{Actor: ollie.Did, Reply: post.Uri, Text: "ℹ️banger"})
-
-	banger, err := d.Labels.FindOrCreateLabel("banger")
-	if err != nil {
-		panic(err)
-	}
-
-	labels, _ := d.CustomLabels.SelectLabelsByLabelId(banger.LabelId, 0, 10)
-	assert.Equal(
-		t,
-		[]int64{post.PostId},
-		CollectSubjectIds(labels, false),
-	)
-
-	d.DeletePost(reply.Uri)
-}
-
 func TestDBxTestBangerCustomLabels(t *testing.T) {
 	d, cleanup := NewTestDBx()
 	defer cleanup()

@@ -35,7 +35,6 @@ var AMELIA_BUT_ALSO_ITS_REM = "did:plc:6gwchzxwoj7jms5nilauupxq"
 var MARK = "did:plc:wzsilnxf24ehtmmc3gssy5bu"
 var REM = "did:plc:asb3rgscdkkv636buq6blof6"
 var SKYTAN = "did:plc:ikvaup2d6nlir7xfm5vgzvra"
-var ʕ٠ᴥ٠ʔ = "did:plc:nhvvwh2qglcmsbvba7durp7f"
 var SQLiteMaxInt int64 = 9223372036854775807
 var PinnedFollowPostUrl = "at://did:plc:wzsilnxf24ehtmmc3gssy5bu/app.bsky.feed.post/3kexw5q5mix22"
 var PinnedFollowPost *PostRow = nil
@@ -827,64 +826,6 @@ func (d *DBx) InsertPost(postRef *firehose.PostRef, actorRow *ActorRow, labels .
 			}
 
 			return nil
-		},
-		func() error {
-			did := utils.ParseDid(uri)
-			if did != ʕ٠ᴥ٠ʔ {
-				return nil
-			}
-
-			if !BangerRegex.MatchString(post.Text) {
-				return nil
-			}
-
-			parent := deferredParent.Get()
-			if parent == nil {
-				return nil
-			}
-
-			banger, err := d.Labels.FindOrCreateLabel("banger")
-			if err != nil {
-				log.Printf("ERROR retrieving banger label: %+v\n", err)
-				return nil
-			}
-			now := d.clock.NowUnix()
-			ver := int64(1)
-			label := &atproto.LabelDefs_Label{
-				Cts: time.Unix(now, 0).UTC().Format(time.RFC3339),
-				Src: LabelerDid,
-				Uri: parentUri,
-				Val: "banger",
-				Ver: &ver,
-			}
-
-			sigBuf := new(bytes.Buffer)
-			err = label.MarshalCBOR(sigBuf)
-			if err != nil {
-				return err
-			}
-
-			sigBytes, err := d.SigningKey.HashAndSign(sigBuf.Bytes())
-			if err != nil {
-				return err
-			}
-			label.Sig = sigBytes
-
-			cborBuf := new(bytes.Buffer)
-			err = label.MarshalCBOR(cborBuf)
-			if err != nil {
-				return err
-			}
-
-			row := &CustomLabel{
-				SubjectType: PostLabelType,
-				SubjectId:   parent.PostId,
-				CreatedAt:   now,
-				LabelId:     banger.LabelId,
-				Cbor:        cborBuf.Bytes(),
-			}
-
-			return d.CustomLabels.InsertLabels([]*CustomLabel{row})
 		},
 		/*
 			func() error {
