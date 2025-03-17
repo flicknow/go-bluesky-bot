@@ -42,10 +42,6 @@ var RequeueCmd = &cli.Command{
 	),
 	Action: func(cctx *cli.Context) error {
 		d := dbx.NewDBx(cmd.ToContext(cctx))
-		bday, err := d.Labels.FindOrCreateLabel("birthday")
-		if err != nil {
-			return err
-		}
 
 		dryrun := cctx.Bool("dry-run")
 		since := cctx.Duration("since")
