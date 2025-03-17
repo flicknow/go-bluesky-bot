@@ -56,7 +56,7 @@ var RequeueCmd = &cli.Command{
 
 		if dryrun {
 			var count int64 = 0
-			row := d.CustomLabels.QueryRow(CountSelect, bday.LabelId, start, end)
+			row := d.CustomLabels.QueryRow(CountSelect, start, end)
 			err := row.Scan(&count)
 			if err != nil {
 				return err
@@ -69,7 +69,7 @@ var RequeueCmd = &cli.Command{
 		chunk := 100
 		for {
 			labels := make([]*dbx.CustomLabel, 0, chunk)
-			err := d.CustomLabels.Select(&labels, RequeueSelect, bday.LabelId, start, end, chunk)
+			err := d.CustomLabels.Select(&labels, RequeueSelect, start, end, chunk)
 			if err != nil {
 				return err
 			}
