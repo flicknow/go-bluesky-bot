@@ -700,6 +700,27 @@ func NewServer(ctx context.Context, indexer *indexer.Indexer) *Server {
 		w.WriteHeader(200)
 		w.Write([]byte(did))
 	})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		stat := syscall.Statfs_t{}
+		err := syscall.Statfs("/var/db", &stat)
+		if err != nil {
+			ISE(w)
+			fmt.Println(err.Error())
+			return
+		}
+
+		p_free := 100 * float64(stat.Bavail) / float64(stat.Blocks)
+		if p_free < 5 {
+			w.Header().Add("content-type", "text/plain; charset=utf-8")
+			ISE(w)
+			w.Write([]byte(fmt.Sprintf("ERROR: disk is %f%% free\n", p_free)))
+			return
+		}
+
+		w.Header().Add("content-type", "text/plain; charset=utf-8")
+		w.WriteHeader(200)
+		w.Write([]byte(fmt.Sprintf("OK: disk is %f%% free\n", p_free)))
+	})
 	mux.HandleFunc("/quotes/", func(w http.ResponseWriter, r *http.Request) {
 		url := r.URL.String()
 		log.Printf("%s %s\n", r.Method, url)
