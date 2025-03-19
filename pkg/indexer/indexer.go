@@ -489,7 +489,7 @@ func (i *Indexer) runCustomLabelerOnce() {
 				return err
 			}
 
-			yearsSince := int(year - 2023)
+			yearsSince := int(year - 2022)
 			for yearsSince > 0 {
 				err := i.Db.RecordBirthdayLabels(clock, yearsSince)
 				if err != nil {
