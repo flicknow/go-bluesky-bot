@@ -66,12 +66,11 @@ var BlueskyBot = &cli.Command{
 		indexer.Start()
 		defer indexer.Stop()
 
-		server := NewServer(cmd.ToContext(cctx), indexer)
-		go server.Serve()
-		defer server.Shutdown(ctx)
-
 		hose := firehose.NewFirehose(cmd.ToContext(cctx))
 		fCh, err := hose.Start(ctx)
+		if err != nil {
+			return err
+		}
 
 		labeler := firehose.NewLabelerFirehose(cmd.ToContext(cctx))
 		lCh, err := labeler.Start(ctx)
