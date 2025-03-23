@@ -165,6 +165,9 @@ func ParallelizeFuncs(funcs ...func() error) []error {
 	var errs = make([]error, 0)
 	for _, err := range errs {
 		if err != nil {
+			if strings.Contains(err.Error(), "could not find name") {
+				panic(err)
+			}
 			errs = append(errs, err)
 		}
 	}

@@ -135,6 +135,9 @@ func RetryDbIsLocked(f func() error) func() error {
 			if err == nil {
 				return nil
 			} else if !(errors.Is(err, sqlite3.ErrBusy) || errors.Is(err, sqlite3.ErrLocked) || strings.Contains(err.Error(), "database is locked")) {
+				if strings.Contains(err.Error(), "could not find name") {
+					panic(err)
+				}
 				fmt.Printf("> RETRY RETURNING ERR: %+v\n", err)
 				return err
 			}
