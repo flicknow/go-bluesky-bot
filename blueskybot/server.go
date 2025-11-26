@@ -3,6 +3,7 @@ package blueskybot
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -536,6 +537,23 @@ func lookupDid(handle string) (string, error) {
 	return "", fmt.Errorf("could not lookup did for %s:\n%s\n", dnsErr, httpsErr)
 }
 
+func getSslCertExpiration(host string) (int, error) {
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", host+":443", &tls.Config{})
+	if err != nil {
+		log.Printf("Error connecting to %s: %v\n", host, err)
+		return 0, fmt.Errorf("Error connecting to %s: %w\n", host, err)
+	}
+	defer conn.Close()
+
+	state := conn.ConnectionState()
+	if len(state.PeerCertificates) > 0 {
+		cert := state.PeerCertificates[0] // Get the first certificate in the chain
+		return int(time.Until(cert.NotAfter).Hours() / 24), nil
+	} else {
+		return 0, fmt.Errorf("No certificates found for %s\n", host)
+	}
+}
+
 func NewServer(ctx context.Context, indexer *indexer.Indexer) *Server {
 	addr, _ := ctx.Value("listen").(string)
 	maxConn, _ := ctx.Value("max-web-connections").(int64)
@@ -709,17 +727,55 @@ func NewServer(ctx context.Context, indexer *indexer.Indexer) *Server {
 			return
 		}
 
+		ok := true
+		threshold := 7
+		results := make(map[string]string)
+
 		p_free := 100 * float64(stat.Bavail) / float64(stat.Blocks)
 		if p_free < 5 {
-			w.Header().Add("content-type", "text/plain; charset=utf-8")
-			ISE(w)
-			w.Write([]byte(fmt.Sprintf("ERROR: disk is %f%% free\n", p_free)))
-			return
+			results["disk"] = fmt.Sprintf("ERROR: disk is %f%% free", p_free)
+			ok = false
+		} else {
+			results["disk"] = fmt.Sprintf("OK: disk is %f%% free", p_free)
 		}
 
-		w.Header().Add("content-type", "text/plain; charset=utf-8")
-		w.WriteHeader(200)
-		w.Write([]byte(fmt.Sprintf("OK: disk is %f%% free\n", p_free)))
+		flicknow_expr, flicknow_err := getSslCertExpiration("flicknow.xyz")
+		if flicknow_err != nil {
+			ok = false
+			results["certificate: flicknow.xyz"] = flicknow_err.Error()
+		} else if flicknow_expr < threshold {
+			ok = false
+			results["certificate: flicknow.xyz"] = fmt.Sprintf("ERROR: certificate expires in %d days", flicknow_expr)
+		} else {
+			results["certificate: flicknow.xyz"] = fmt.Sprintf("OK: certificate expires in %d days", flicknow_expr)
+		}
+
+		labeler_expr, labeler_err := getSslCertExpiration("labeler.flicknow.xyz")
+		if labeler_err != nil {
+			ok = false
+			results["certificate: labeler.flicknow.xyz"] = labeler_err.Error()
+		} else if labeler_expr < threshold {
+			ok = false
+			results["certificate: labeler.flicknow.xyz"] = fmt.Sprintf("ERROR: certificate expires in %d days", labeler_expr)
+		} else {
+			results["certificate: labeler.flicknow.xyz"] = fmt.Sprintf("OK: certificate expires in %d days", labeler_expr)
+		}
+
+		w.Header().Add("content-type", "application/json")
+		if ok {
+			results["status"] = "OK"
+			w.WriteHeader(200)
+		} else {
+			results["status"] = "ERROR"
+			w.WriteHeader(500)
+		}
+		b, err := json.Marshal(results)
+		if err != nil {
+			log.Printf("%+v\n", err)
+			ISE(w)
+			return
+		}
+		w.Write(b)
 	})
 	mux.HandleFunc("/quotes/", func(w http.ResponseWriter, r *http.Request) {
 		url := r.URL.String()
