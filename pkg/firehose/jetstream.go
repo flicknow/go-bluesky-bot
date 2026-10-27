@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bluesky-social/jetstream/pkg/models"
+	"github.com/bluesky-social/jetstream"
 	"github.com/flicknow/go-bluesky-bot/pkg/utils"
 	"github.com/gorilla/websocket"
 )
@@ -33,7 +33,7 @@ type Jetstream struct {
 
 type JetstreamEvent struct {
 	Error error
-	Body  models.Event
+	Body  jetstream.Event
 }
 
 func NewJetstream(addr string, cursorPath string) *Jetstream {
@@ -256,7 +256,7 @@ func (s *Jetstream) consumeStream(ctx context.Context, con *websocket.Conn, ch c
 			return err
 		}
 
-		event := models.Event{}
+		event := jetstream.Event{}
 		err = json.Unmarshal(buffer.Bytes(), &event)
 		if err != nil {
 			ch <- &JetstreamEvent{Error: err}

@@ -249,10 +249,10 @@ func (c *defaultClient) GetAuthorFeed(handle string, filter string, limit int64,
 	defer c.reqmu.Unlock()
 
 	ctx := c.intrcptrContext()
-	feed, err := appbsky.FeedGetAuthorFeed(ctx, c.xrpcc, handle, cursor, filter, limit)
+	feed, err := appbsky.FeedGetAuthorFeed(ctx, c.xrpcc, handle, cursor, filter, false, limit)
 	if err != nil {
 		c.Refresh()
-		feed, err = appbsky.FeedGetAuthorFeed(ctx, c.xrpcc, handle, cursor, filter, limit)
+		feed, err = appbsky.FeedGetAuthorFeed(ctx, c.xrpcc, handle, cursor, filter, false, limit)
 	}
 	if err != nil {
 		res := intrcptrRes(ctx)
@@ -279,10 +279,10 @@ func (c *defaultClient) GetFollows(did string, limit int64, cursor string) ([]*c
 
 	ctx := c.intrcptrContext()
 
-	records, err := comatproto.RepoListRecords(ctx, c.xrpcc, "app.bsky.graph.follow", cursor, limit, did, false, "", "")
+	records, err := comatproto.RepoListRecords(ctx, c.xrpcc, "app.bsky.graph.follow", cursor, limit, did, false)
 	if err != nil {
 		c.Refresh()
-		records, err = comatproto.RepoListRecords(ctx, c.xrpcc, "app.bsky.graph.follow", cursor, limit, did, false, "", "")
+		records, err = comatproto.RepoListRecords(ctx, c.xrpcc, "app.bsky.graph.follow", cursor, limit, did, false)
 	}
 	if err != nil {
 		res := intrcptrRes(ctx)
@@ -348,10 +348,10 @@ func (c *defaultClient) GetLists(actor string, cursor string, limit int64) ([]*a
 	defer c.reqmu.Unlock()
 
 	ctx := c.intrcptrContext()
-	output, err := appbsky.GraphGetLists(ctx, c.xrpcc, actor, cursor, limit)
+	output, err := appbsky.GraphGetLists(ctx, c.xrpcc, actor, cursor, limit, []string{})
 	if err != nil {
 		c.Refresh()
-		output, err = appbsky.GraphGetLists(ctx, c.xrpcc, actor, cursor, limit)
+		output, err = appbsky.GraphGetLists(ctx, c.xrpcc, actor, cursor, limit, []string{})
 	}
 	if err != nil {
 		res := intrcptrRes(ctx)

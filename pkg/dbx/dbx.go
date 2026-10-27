@@ -10,12 +10,13 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/bluesky-social/indigo/api/atproto"
-	"github.com/bluesky-social/indigo/atproto/crypto"
+	"github.com/bluesky-social/indigo/atproto/atcrypto"
 	"github.com/flicknow/go-bluesky-bot/pkg/clock"
 	"github.com/flicknow/go-bluesky-bot/pkg/cmd"
 	"github.com/flicknow/go-bluesky-bot/pkg/firehose"
@@ -31,9 +32,12 @@ var DefaultDbLabelCacheSize = 500000
 var DefaultDbFollowCacheSize = 50000
 
 var LabelerDid = "did:plc:jcce2sa3fgue4wiocvf7e7xj"
-var AMELIA_BUT_ALSO_ITS_REM = "did:plc:6gwchzxwoj7jms5nilauupxq"
 var MARK = "did:plc:wzsilnxf24ehtmmc3gssy5bu"
-var REM = "did:plc:asb3rgscdkkv636buq6blof6"
+var FORVER_BDAY = []string{
+	"did:plc:6gwchzxwoj7jms5nilauupxq", // amelia
+	"did:plc:asb3rgscdkkv636buq6blof6", // rem
+	"did:plc:oihd7pohncioyoyraqlunaay", // kim
+}
 var SKYTAN = "did:plc:ikvaup2d6nlir7xfm5vgzvra"
 var SQLiteMaxInt int64 = 9223372036854775807
 var PinnedFollowPostUrl = "at://did:plc:wzsilnxf24ehtmmc3gssy5bu/app.bsky.feed.post/3kexw5q5mix22"
@@ -65,7 +69,7 @@ type DBx struct {
 	clock            clock.Clock
 	debug            bool
 	extendedIndexing bool
-	SigningKey       *crypto.PrivateKeyK256
+	SigningKey       *atcrypto.PrivateKeyK256
 }
 
 func (d *DBx) Block(did string) error {
@@ -2818,8 +2822,7 @@ func (d *DBx) RecordUnbirthdayLabels(t clock.Clock, yearsAgo int) error {
 	labels := make([]*CustomLabel, 0, len(actors))
 	for _, actor := range actors {
 		did := actor.Did
-		if (did == REM) || (did == AMELIA_BUT_ALSO_ITS_REM) {
-			// it is always rem's birthday
+		if slices.Contains(FORVER_BDAY, did) {
 			continue
 		}
 
@@ -3071,7 +3074,7 @@ func NewDBx(ctx context.Context) *DBx {
 		panic(err)
 	}
 
-	signingKey, err := crypto.ParsePrivateBytesK256(signingKeyBytes)
+	signingKey, err := atcrypto.ParsePrivateBytesK256(signingKeyBytes)
 	if err != nil {
 		panic(err)
 	}

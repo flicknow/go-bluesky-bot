@@ -12,7 +12,7 @@ import (
 	"time"
 
 	comatproto "github.com/bluesky-social/indigo/api/atproto"
-	"github.com/bluesky-social/indigo/atproto/crypto"
+	"github.com/bluesky-social/indigo/atproto/atcrypto"
 
 	"github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/api/bsky"
@@ -157,7 +157,7 @@ func NewTestDBxContext(ctx context.Context) (*testDBx, func()) {
 		panic(err)
 	}
 
-	priv, err := crypto.GeneratePrivateKeyK256()
+	priv, err := atcrypto.GeneratePrivateKeyK256()
 	if err != nil {
 		panic(err)
 	}

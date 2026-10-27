@@ -5,11 +5,11 @@ import (
 	"encoding/hex"
 
 	"github.com/bluesky-social/indigo/api/atproto"
-	"github.com/bluesky-social/indigo/atproto/crypto"
+	"github.com/bluesky-social/indigo/atproto/atcrypto"
 )
 
 type SigningKey struct {
-	signingKey *crypto.PrivateKeyK256
+	signingKey *atcrypto.PrivateKeyK256
 }
 
 func NewSigningKey(signingKeyHex string) (*SigningKey, error) {
@@ -19,7 +19,7 @@ func NewSigningKey(signingKeyHex string) (*SigningKey, error) {
 		return nil, err
 	}
 
-	signingKey, err := crypto.ParsePrivateBytesK256(signingKeyBytes)
+	signingKey, err := atcrypto.ParsePrivateBytesK256(signingKeyBytes)
 	if err != nil {
 		return nil, err
 

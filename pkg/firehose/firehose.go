@@ -332,12 +332,6 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) []*FirehoseEven
 	}
 
 	switch header.MsgType {
-	case "#handle":
-		var evt comatproto.SyncSubscribeRepos_Handle
-		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
-			return []*FirehoseEvent{&FirehoseEvent{Error: fmt.Errorf("error unmarshalling #handle: %w", err), Type: EvtKindError}}
-		}
-		return []*FirehoseEvent{&FirehoseEvent{Seq: evt.Seq, Type: header.MsgType}}
 	case "#identity":
 		var evt comatproto.SyncSubscribeRepos_Identity
 		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
@@ -350,18 +344,6 @@ func (f *Firehose) processSubscriberEvent(sEvt *SubscriberEvent) []*FirehoseEven
 			return []*FirehoseEvent{&FirehoseEvent{Error: fmt.Errorf("error unmarshalling #info: %w", err), Type: EvtKindError}}
 		}
 		return []*FirehoseEvent{&FirehoseEvent{Info: &evt, Type: header.MsgType}}
-	case "#migrate":
-		var evt comatproto.SyncSubscribeRepos_Migrate
-		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
-			return []*FirehoseEvent{&FirehoseEvent{Error: fmt.Errorf("error unmarshalling #migrate: %w", err), Type: EvtKindError}}
-		}
-		return []*FirehoseEvent{&FirehoseEvent{Seq: evt.Seq, Type: header.MsgType}}
-	case "#tombstone":
-		var evt comatproto.SyncSubscribeRepos_Tombstone
-		if err := evt.UnmarshalCBOR(sEvt.Body); err != nil {
-			return []*FirehoseEvent{&FirehoseEvent{Error: fmt.Errorf("error unmarshalling #tombstone: %w", err), Type: EvtKindError}}
-		}
-		return []*FirehoseEvent{&FirehoseEvent{Tombstone: evt.Did, Seq: evt.Seq, Type: header.MsgType}}
 	case "#commit":
 		ctx := f.s.conCtx
 
